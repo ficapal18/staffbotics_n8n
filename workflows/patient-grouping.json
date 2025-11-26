@@ -163,7 +163,16 @@
         "typeVersion": 1
       }
     ],
-    "connections": {},
+    "connections": {
+        "Receive Batch (Webhook)": [{ "node": "Build RawItems", "type": "main", "index": 0 }],
+        "Build RawItems": [{ "node": "Heuristic Analysis", "type": "main", "index": 0 }],
+        "Heuristic Analysis": [{ "node": "Structure Advisor (LLM)", "type": "main", "index": 0 }],
+        "Structure Advisor (LLM)": [{ "node": "Parse LLM Config", "type": "main", "index": 0 }],
+        "Parse LLM Config": [{ "node": "Auto Grouping", "type": "main", "index": 0 }],
+        "Auto Grouping": [{ "node": "Summarize Proposal", "type": "main", "index": 0 }],
+        "Apply Reorg (Webhook)": [{ "node": "NL → Operations (LLM)", "type": "main", "index": 0 }],
+        "NL → Operations (LLM)": [{ "node": "Apply Operations", "type": "main", "index": 0 }]
+    },
     "settings": {
       "executionOrder": "v1"
     },
@@ -171,7 +180,7 @@
     "meta": null,
     "pinData": {},
     "versionId": "3845a76b-1296-411c-b820-8f33312548e6",
-    "versionCounter": 3,
+    "versionCounter": 1,
     "triggerCount": 0,
     "tags": [],
     "shared": [
