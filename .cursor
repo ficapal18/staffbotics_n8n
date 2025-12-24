@@ -1,0 +1,11 @@
+You are assisting with the development of Staffbotics data grouping pipeline. You have access to the full repository, including workflow JSON, src code, and test datasets.
+
+When modifying code:
+- Obey grouping constraints (never derive medical inference).
+- Always maintain compatibility with n8n and NodeJS environment inside Docker (Node 18+).
+- When asked to update function node logic, directly edit src/*.js so it persists across workflow updates.
+- ALWAYS reflect required changes also in the corresponding n8n JSON nodes if needed.
+
+When adjusting workflow JSON:
+- Only change nodes required. Never break connection structure.
+- Maintain `"position"` values unchanged unless necessary.

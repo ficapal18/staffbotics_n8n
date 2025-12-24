@@ -1,0 +1,17 @@
+{
+    "excelFiles": [
+      {
+        "name": "patients.xlsx",
+        "rows": [
+          { "Name": "John Doe", "NHC": "1234", "Age": 59, "Comments": "Has 2 PDF documents" },
+          { "Name": "Anna Smith", "NHC": "1235", "Age": 71, "Comments": "Only one report file" }
+        ]
+      }
+    ],
+    "files": [
+      { "path": "sample_batch_1/1234_scan.pdf", "filename": "1234_scan.pdf" },
+      { "path": "sample_batch_1/1234_report.pdf", "filename": "1234_report.pdf" },
+      { "path": "sample_batch_1/1235_report.pdf", "filename": "1235_report.pdf" }
+    ]
+  }
+  

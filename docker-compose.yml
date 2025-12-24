@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:14
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_POSTGRESDB_USER}
+      POSTGRES_PASSWORD: ${DB_POSTGRESDB_PASSWORD}
+      POSTGRES_DB: ${DB_POSTGRESDB_DATABASE}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_POSTGRESDB_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "${DB_POSTGRESDB_PORT}:5432"
+    volumes:
+      - ./db:/var/lib/postgresql/data
+
+  n8n:
+    image: n8nio/n8n:latest
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${N8N_PORT}:5678"
+    environment:
+      - N8N_BASIC_AUTH_USER
+      - N8N_BASIC_AUTH_PASSWORD
+      - N8N_USER_MANAGEMENT_DISABLED
+      - N8N_HOST
+      - N8N_PORT=5678
+      - N8N_EDITOR_BASE_URL
+      - N8N_PROTOCOL
+      - DB_TYPE
+      - DB_POSTGRESDB_HOST
+      - DB_POSTGRESDB_PORT
+      - DB_POSTGRESDB_DATABASE
+      - DB_POSTGRESDB_USER
+      - DB_POSTGRESDB_PASSWORD
+      - N8N_LOG_LEVEL
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS
+      - OPENAI_API_KEY
+      - NODE_FUNCTION_ALLOW_BUILTIN=*
+      - NODE_FUNCTION_ALLOW_EXTERNAL=*
+
+    volumes:
+      - ./workflows:/data/workflows
+      - ./src:/data/src
+      - ./local_files:/data/local_files
+      # existing
+      - ./sync-workflow.sh:/data/sync-workflow.sh:ro
+      - ./import_overwrite.sh:/data/import_overwrite.sh:ro
+      # ✅ STRONGLY RECOMMENDED persistence
+      - ./n8n_data:/home/node/.n8n

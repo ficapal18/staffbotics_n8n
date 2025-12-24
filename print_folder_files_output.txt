@@ -1,0 +1,799 @@
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/grouping.js
+TOTAL LINES: 229
+FILE NAME: grouping.js
+FILE EXTENSION: .js
+--------------------------------------------------------------------------------
+// src/grouping.js
+// LLM usage: autoGroup(rawItems, groupingConfig, analysisText) -> { patientCandidates, groupingConfig, analysisText, rawItems }
+/**
+ * Helper: create a base PatientCandidate object.
+ */
+function createCandidate(candidateId, inferredKey) {
+    return {
+      candidate_id: candidateId,
+      inferred_key: inferredKey,
+      inferred_identifiers: {},
+      raw_items: [],
+      confidence: 0.8,
+      notes: []
+    };
+  }
+  
+  /**
+   * Helper: extract identifiers from an Excel row.
+   * We try to infer patient_id, name, dob using very simple name heuristics.
+   */
+  function extractIdentifiersFromRow(row = {}) {
+    const ident = {};
+    Object.keys(row || {}).forEach((k) => {
+      const lk = k.toLowerCase();
+      const value = row[k];
+  
+      if (
+        lk.includes("nhc") ||
+        lk.includes("historia") ||
+        lk === "id" ||
+        lk.endsWith("_id")
+      ) {
+        ident.patient_id = value;
+      }
+      if (lk.includes("name") || lk.includes("nom")) {
+        ident.name = value;
+      }
+      if (lk.includes("birth") || lk.includes("dob") || lk.includes("naixement")) {
+        ident.dob = value;
+      }
+    });
+    return ident;
+  }
+  
+  /**
+   * Main grouping function.
+   *
+   * @param {Array} rawItems - list of RawItem
+   * @param {Object} groupingConfig - config suggested by LLM or defaults
+   * @param {string} analysisText - heuristic explanation (carried along)
+   *
+   * Returns:
+   * {
+   *   patientCandidates,
+   *   groupingConfig,
+   *   analysisText,
+   *   rawItems
+   * }
+   */
+  function autoGroup(rawItems = [], groupingConfig = {}, analysisText = "") {
+    const unitStrategy = groupingConfig.unit_strategy || "excel_row";
+    const excelCfg = groupingConfig.excel || {};
+    const folderCfg = groupingConfig.folder || {};
+  
+    const patientCandidates = [];
+  
+    // Strategy: excel_row
+    if (unitStrategy === "excel_row") {
+      const idColumn = excelCfg.id_column || null;
+  
+      // Create candidates from excel rows
+      rawItems
+        .filter((ri) => ri.source_type === "excel_row")
+        .forEach((ri) => {
+          const meta = ri.metadata || {};
+          const file = meta.file || "unknown_excel";
+          const rowIndex = meta.row_index ?? 0;
+          const row = meta.columns || {};
+          const candidateId = `${file}_row_${rowIndex}`;
+  
+          const pc = createCandidate(
+            candidateId,
+            `Excel row ${rowIndex} in ${file}`
+          );
+          const identifiers = extractIdentifiersFromRow(row);
+          if (idColumn && row[idColumn] !== undefined) {
+            if (!identifiers.patient_id) identifiers.patient_id = row[idColumn];
+          }
+          pc.inferred_identifiers = identifiers;
+          pc.raw_items.push(ri);
+          patientCandidates.push(pc);
+        });
+  
+      // Attach file-type rawItems by ID or name in filename
+      const fileItems = rawItems.filter((ri) => ri.source_type === "file");
+      fileItems.forEach((fi) => {
+        const meta = fi.metadata || {};
+        const filename = (meta.filename || "").toLowerCase();
+        let attached = false;
+  
+        for (const pc of patientCandidates) {
+          const ident = pc.inferred_identifiers || {};
+          const pid = String(ident.patient_id || "").toLowerCase();
+          const name = String(ident.name || "").toLowerCase();
+  
+          if (pid && filename.includes(pid)) {
+            pc.raw_items.push(fi);
+            attached = true;
+            break;
+          }
+          if (name) {
+            const token = name.split(/\s+/)[0];
+            if (token && filename.includes(token.toLowerCase())) {
+              pc.raw_items.push(fi);
+              attached = true;
+              break;
+            }
+          }
+        }
+  
+        if (!attached) {
+          const pc = createCandidate(
+            `file_only_${fi.id}`,
+            `Unassigned file ${meta.filename || fi.id}`
+          );
+          pc.raw_items.push(fi);
+          pc.confidence = 0.3;
+          pc.notes.push("Unassigned file; no matching patient found.");
+          patientCandidates.push(pc);
+        }
+      });
+    }
+  
+    // Strategy: subfolder
+    else if (unitStrategy === "subfolder") {
+      const folderMap = {};
+      rawItems
+        .filter((ri) => ri.source_type === "file")
+        .forEach((ri) => {
+          const meta = ri.metadata || {};
+          const folder = meta.folder_path || "root";
+          if (!folderMap[folder]) folderMap[folder] = [];
+          folderMap[folder].push(ri);
+        });
+  
+      Object.entries(folderMap).forEach(([folder, list]) => {
+        const pc = createCandidate(`folder::${folder}`, `Folder '${folder}'`);
+        pc.raw_items.push(...list);
+        pc.confidence = 0.85;
+        patientCandidates.push(pc);
+      });
+    }
+  
+    // Strategy: id_in_filename
+    else if (unitStrategy === "id_in_filename") {
+      const patterns = folderCfg.id_patterns || [];
+      const idMap = {};
+      const reCache = {};
+  
+      rawItems
+        .filter((ri) => ri.source_type === "file")
+        .forEach((ri) => {
+          const meta = ri.metadata || {};
+          const filename = meta.filename || "";
+          let matchedId = null;
+  
+          for (const pat of patterns) {
+            if (!reCache[pat]) {
+              try {
+                reCache[pat] = new RegExp(pat);
+              } catch (e) {
+                reCache[pat] = null;
+              }
+            }
+            const re = reCache[pat];
+            if (!re) continue;
+            const m = filename.match(re);
+            if (m) {
+              matchedId = m[0];
+              break;
+            }
+          }
+  
+          if (!matchedId) {
+            matchedId = `unassigned::${ri.id}`;
+          }
+  
+          if (!idMap[matchedId]) idMap[matchedId] = [];
+          idMap[matchedId].push(ri);
+        });
+  
+      Object.entries(idMap).forEach(([pid, list]) => {
+        const pc = createCandidate(`id::${pid}`, `ID from filename '${pid}'`);
+        pc.raw_items.push(...list);
+        if (!pid.startsWith("unassigned::")) {
+          pc.inferred_identifiers = { patient_id: pid };
+          pc.confidence = 0.8;
+        } else {
+          pc.confidence = 0.3;
+          pc.notes.push("Unassigned file; no ID pattern match.");
+        }
+        patientCandidates.push(pc);
+      });
+    }
+  
+    // Strategy: fallback
+    else {
+      rawItems.forEach((ri) => {
+        const pc = createCandidate(`single::${ri.id}`, `Single source item ${ri.id}`);
+        pc.raw_items.push(ri);
+        pc.confidence = 0.2;
+        pc.notes.push("Fallback grouping: one item per candidate.");
+        patientCandidates.push(pc);
+      });
+    }
+  
+    return {
+      patientCandidates,
+      groupingConfig,
+      analysisText,
+      rawItems
+    };
+  }
+  
+  module.exports = {
+    autoGroup,
+    extractIdentifiersFromRow
+  };
+  
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/rawItems.js
+TOTAL LINES: 74
+FILE NAME: rawItems.js
+FILE EXTENSION: .js
+--------------------------------------------------------------------------------
+// src/rawItems.js
+// LLM usage: buildRawItemsFromWebhookBody(body) -> { rawItems, originalBody }
+/**
+ * Build rawItems[] from a generic webhook body.
+ *
+ * Expected body structure (can be adapted):
+ * {
+ *   excelFiles: [
+ *     { name: "patients.xlsx", rows: [ { col1: ..., col2: ... }, ... ] }
+ *   ],
+ *   files: [
+ *     { path: "folderA/1234_report.pdf", filename: "1234_report.pdf" },
+ *     ...
+ *   ]
+ * }
+ *
+ * Returns: { rawItems, originalBody }
+ */
+function buildRawItemsFromWebhookBody(body = {}) {
+    const excelFiles = body.excelFiles || [];
+    const files = body.files || [];
+  
+    const rawItems = [];
+  
+    // Excel rows → RawItems
+    excelFiles.forEach((ef, efIndex) => {
+      const fileName = ef.name || `excel_${efIndex}`;
+      const rows = ef.rows || [];
+      rows.forEach((row, rowIndex) => {
+        rawItems.push({
+          id: `${fileName}_row_${rowIndex}`,
+          source_type: "excel_row",
+          source_ref: `${fileName}#row_${rowIndex}`,
+          metadata: {
+            file: fileName,
+            row_index: rowIndex,
+            columns: row
+          }
+        });
+      });
+    });
+  
+    // Generic files → RawItems
+    files.forEach((f, fIndex) => {
+      const path = f.path || f.fullPath || f.filename;
+      const filename = f.filename || (path ? path.split("/").slice(-1)[0] : `file_${fIndex}`);
+      let folderPath = null;
+      if (path && path.includes("/")) {
+        folderPath = path.split("/").slice(0, -1).join("/");
+      }
+      rawItems.push({
+        id: `file_${fIndex}`,
+        source_type: "file",
+        source_ref: path || filename,
+        metadata: {
+          filename,
+          folder_path: folderPath,
+          extension: filename.includes(".")
+            ? filename.split(".").slice(-1)[0].toLowerCase()
+            : null
+        }
+      });
+    });
+  
+    return {
+      rawItems,
+      originalBody: body
+    };
+  }
+  
+  module.exports = {
+    buildRawItemsFromWebhookBody
+  };
+  
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/heuristics.js
+TOTAL LINES: 90
+FILE NAME: heuristics.js
+FILE EXTENSION: .js
+--------------------------------------------------------------------------------
+// src/heuristics.js
+// LLM usage: buildHeuristicAnalysis(originalBody) -> { analysisText }
+/**
+ * Analyze the originalBody (excelFiles + files) and produce a human-readable
+ * analysisText describing candidate ID columns and folder structure.
+ *
+ * Returns: { analysisText }
+ */
+function buildHeuristicAnalysis(originalBody = {}) {
+    const excelFiles = originalBody.excelFiles || [];
+    const files = originalBody.files || [];
+  
+    const analysisLines = [];
+  
+    // Excel analysis
+    excelFiles.forEach((ef, efIndex) => {
+      const fileName = ef.name || `excel_${efIndex}`;
+      const rows = ef.rows || [];
+      analysisLines.push(`Excel file '${fileName}' with ${rows.length} rows.`);
+  
+      if (rows.length) {
+        const colNames = Object.keys(rows[0]);
+        analysisLines.push(`Columns: ${JSON.stringify(colNames)}`);
+  
+        const colStats = colNames.map((col) => {
+          const values = rows.map((r) => String(r[col]));
+          const nonNull = values.filter(
+            (v) =>
+              v !== null &&
+              v !== undefined &&
+              v !== "" &&
+              v !== "null" &&
+              v !== "None"
+          );
+          const distinct = new Set(nonNull);
+          const uniqueness = nonNull.length ? distinct.size / nonNull.length : 0.0;
+          const nullRatio = values.length
+            ? 1.0 - nonNull.length / values.length
+            : 0.0;
+          return { name: col, uniqueness, nullRatio };
+        });
+  
+        colStats.sort((a, b) => {
+          if (b.uniqueness !== a.uniqueness) return b.uniqueness - a.uniqueness;
+          return a.nullRatio - b.nullRatio;
+        });
+  
+        if (colStats.length) {
+          const best = colStats[0];
+          analysisLines.push(
+            `Best ID-like column candidate: '${best.name}' (uniqueness=${best.uniqueness.toFixed(
+              2
+            )}, null_ratio=${best.nullRatio.toFixed(2)}).`
+          );
+        }
+      }
+    });
+  
+    // Folder structure analysis
+    const folderCounts = {};
+    files.forEach((f) => {
+      const path = f.path || f.fullPath || f.filename;
+      if (!path) return;
+      const parts = path.split("/");
+      if (parts.length > 1) {
+        const folder = parts.slice(0, -1).join("/");
+        folderCounts[folder] = (folderCounts[folder] || 0) + 1;
+      }
+    });
+  
+    if (Object.keys(folderCounts).length) {
+      analysisLines.push("Folder structure:");
+      Object.entries(folderCounts)
+        .slice(0, 20)
+        .forEach(([folder, count]) => {
+          analysisLines.push(` - Folder '${folder}' has ${count} files.`);
+        });
+    }
+  
+    const analysisText = analysisLines.length
+      ? analysisLines.join("\n")
+      : "No strong structure detected.";
+  
+    return { analysisText };
+  }
+  
+  module.exports = {
+    buildHeuristicAnalysis
+  };
+  
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/index.js
+TOTAL LINES: 16
+FILE NAME: index.js
+FILE EXTENSION: .js
+--------------------------------------------------------------------------------
+// src/index.js
+// LLM usage: require('/data/src') to get all helpers in one import.
+const { buildRawItemsFromWebhookBody } = require("./rawItems");
+const { buildHeuristicAnalysis } = require("./heuristics");
+const { autoGroup, extractIdentifiersFromRow } = require("./grouping");
+const { summarizeProposal } = require("./summary");
+const { applyOperations } = require("./operations");
+
+module.exports = {
+  buildRawItemsFromWebhookBody,
+  buildHeuristicAnalysis,
+  autoGroup,
+  extractIdentifiersFromRow,
+  summarizeProposal,
+  applyOperations
+};
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/summary.js
+TOTAL LINES: 36
+FILE NAME: summary.js
+FILE EXTENSION: .js
+--------------------------------------------------------------------------------
+// src/summary.js
+// LLM usage: summarizeProposal(patientCandidates, groupingConfig, analysisText) -> { summary }
+/**
+ * Build a human-readable summary of the proposed grouping.
+ *
+ * @param {Array} patientCandidates
+ * @param {Object} groupingConfig
+ * @param {string} analysisText
+ *
+ * Returns: { summary }
+ */
+function summarizeProposal(patientCandidates = [], groupingConfig = {}, analysisText = "") {
+    const summaryLines = [];
+  
+    summaryLines.push("Proposed patient grouping structure:");
+    summaryLines.push(`- Strategy: ${groupingConfig.unit_strategy}`);
+    summaryLines.push(`- Excel config: ${JSON.stringify(groupingConfig.excel || {})}`);
+    summaryLines.push(`- Folder config: ${JSON.stringify(groupingConfig.folder || {})}`);
+    summaryLines.push(`- Number of patient candidates: ${patientCandidates.length}`);
+  
+    const lowConf = patientCandidates.filter((pc) => (pc.confidence || 0) < 0.5);
+    summaryLines.push(`- Low confidence candidates (<0.5): ${lowConf.length}`);
+  
+    summaryLines.push("");
+    summaryLines.push("Heuristic analysis recap:");
+    summaryLines.push(analysisText || "(none)");
+  
+    const summary = summaryLines.join("\n");
+  
+    return { summary };
+  }
+  
+  module.exports = {
+    summarizeProposal
+  };
+  
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/operations.js
+TOTAL LINES: 88
+FILE NAME: operations.js
+FILE EXTENSION: .js
+--------------------------------------------------------------------------------
+// src/operations.js
+// LLM usage: applyOperations(patientCandidates, operations, userInstruction) -> { patientCandidates, operationsApplied, userInstruction }
+/**
+ * Apply a list of operations (merge, reassign, change_strategy) over patientCandidates.
+ *
+ * @param {Array} patientCandidates
+ * @param {Array} operations - list of { op: string, params: any }
+ * @param {string} userInstruction
+ *
+ * Returns: { patientCandidates, operationsApplied, userInstruction }
+ */
+function applyOperations(patientCandidates = [], operations = [], userInstruction = "") {
+    const pcById = {};
+    patientCandidates.forEach((pc) => {
+      pcById[pc.candidate_id] = pc;
+    });
+  
+    function applyMerge(params) {
+      const from = params.from || [];
+      const into = params.into;
+      if (!into || !pcById[into]) return;
+      const dst = pcById[into];
+  
+      from.forEach((sid) => {
+        if (sid === into) return;
+        const src = pcById[sid];
+        if (!src) return;
+        const srcItems = src.raw_items || [];
+        dst.raw_items = (dst.raw_items || []).concat(srcItems);
+        src.raw_items = [];
+        src.notes = (src.notes || []).concat(`Merged into ${into}`);
+        src.confidence = 0.0;
+      });
+    }
+  
+    function applyReassign(params) {
+      const rid = params.raw_item_id;
+      const newCid = params.new_candidate;
+      if (!rid || !pcById[newCid]) return;
+  
+      // Remove from all candidates
+      patientCandidates.forEach((pc) => {
+        const ris = pc.raw_items || [];
+        pc.raw_items = ris.filter((ri) => ri.id !== rid);
+      });
+  
+      // We assume the rawItem still exists globally and could be looked up.
+      // Here, we push a stub to mark that it was reassigned.
+      const target = pcById[newCid];
+      target.raw_items = target.raw_items || [];
+      target.raw_items.push({
+        id: rid,
+        source_type: "unknown",
+        source_ref: "reassigned",
+        metadata: {}
+      });
+    }
+  
+    function applyChangeStrategy(params) {
+      const newStrategy = params.unit_strategy;
+      if (!newStrategy) return;
+      patientCandidates.forEach((pc) => {
+        pc.notes = pc.notes || [];
+        pc.notes.push(
+          `User requested strategy change to ${newStrategy} (not auto-applied in this step).`
+        );
+      });
+    }
+  
+    operations.forEach((op) => {
+      const opType = op.op;
+      const params = op.params || {};
+      if (opType === "merge") applyMerge(params);
+      else if (opType === "reassign") applyReassign(params);
+      else if (opType === "change_strategy") applyChangeStrategy(params);
+    });
+  
+    return {
+      patientCandidates,
+      operationsApplied: operations,
+      userInstruction
+    };
+  }
+  
+  module.exports = {
+    applyOperations
+  };
+  
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/workflows/staffbotics.json
+TOTAL LINES: 222
+FILE NAME: staffbotics.json
+FILE EXTENSION: .json
+--------------------------------------------------------------------------------
+{
+  "name": "Staffbotics Patient Grouping (MVP)",
+  "nodes": [
+    {
+      "id": "1",
+      "name": "Receive Batch (Webhook)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [260, 300],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "staffbotics-batch",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "2",
+      "name": "Build RawItems",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [620, 300],
+      "parameters": {
+        "functionCode": "const { buildRawItemsFromWebhookBody } = require('/data/src');\n\n// Webhook payload is usually in items[0].json.body, but handle both cases.\nconst payload = items[0].json.body ?? items[0].json;\n\nconst out = buildRawItemsFromWebhookBody(payload);\n\nreturn [{ json: out }];"
+      }
+    },
+    {
+      "id": "3",
+      "name": "Heuristic Analysis",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [980, 300],
+      "parameters": {
+        "functionCode": "const { buildHeuristicAnalysis } = require('/data/src');\n\nconst originalBody = items[0].json.originalBody ?? {};\nconst { analysisText } = buildHeuristicAnalysis(originalBody);\n\nreturn [{\n  json: {\n    ...items[0].json,\n    analysisText\n  }\n}];"
+      }
+    },
+    {
+      "id": "4",
+      "name": "Structure Advisor (LLM)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [1360, 300],
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "method": "POST",
+        "authentication": "none",
+        "jsonParameters": true,
+        "sendHeaders": true,
+        "headerParametersJson": "{\n  \"Authorization\": \"Bearer {{$env.OPENAI_API_KEY}}\",\n  \"Content-Type\": \"application/json\"\n}",
+        "bodyParametersJson": "{\n  \"model\": \"gpt-5.2-mini\",\n  \"temperature\": 0,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You output ONLY valid JSON (no markdown, no prose).\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"You are configuring a deterministic bulk-to-patient grouping step.\\n\\nReturn ONLY a JSON object with this schema:\\n{\\n  \\\"unit_strategy\\\": \\\"excel_row\\\"|\\\"subfolder\\\"|\\\"id_in_filename\\\"|\\\"fallback\\\",\\n  \\\"excel\\\": { \\\"id_column\\\": string|null },\\n  \\\"folder\\\": { \\\"id_patterns\\\": string[] }\\n}\\n\\nGuidance:\\n- If any Excel is present, prefer unit_strategy=excel_row, and set excel.id_column if an ID-like column is clear.\\n- If folders strongly look like per-patient folders, choose subfolder.\\n- If filenames contain consistent patient IDs, choose id_in_filename and propose 1-3 regex patterns.\\n- Otherwise fallback.\\n\\nHeuristic analysis:\\n{{$node[\\\"Heuristic Analysis\\\"].json.analysisText}}\"\n    }\n  ]\n}",
+        "options": {}
+      }
+    },
+    {
+      "id": "5",
+      "name": "Parse LLM Config",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1720, 300],
+      "parameters": {
+        "functionCode": "function safeParseJson(text) {\n  if (!text || typeof text !== 'string') return null;\n  try { return JSON.parse(text); } catch (e) {}\n  const m = text.match(/\\{[\\s\\S]*\\}/);\n  if (m) {\n    try { return JSON.parse(m[0]); } catch (e) {}\n  }\n  return null;\n}\n\n// This node receives the HTTP response as items[0].json\nconst llmResp = items[0].json;\nconst content = llmResp?.choices?.[0]?.message?.content ?? '';\n\nconst groupingConfig = safeParseJson(content) || { unit_strategy: 'excel_row', excel: { id_column: null }, folder: { id_patterns: [] } };\n\n// Pull rawItems + analysisText from the previous deterministic nodes\nconst rawItems = $node['Heuristic Analysis'].json.rawItems ?? [];\nconst analysisText = $node['Heuristic Analysis'].json.analysisText ?? '';\nconst originalBody = $node['Heuristic Analysis'].json.originalBody ?? {};\n\nreturn [{\n  json: {\n    rawItems,\n    analysisText,\n    originalBody,\n    groupingConfig,\n    llm_raw: content\n  }\n}];"
+      }
+    },
+    {
+      "id": "6",
+      "name": "Auto Grouping",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2080, 300],
+      "parameters": {
+        "functionCode": "const { autoGroup } = require('/data/src');\n\nconst rawItems = items[0].json.rawItems ?? [];\nconst groupingConfig = items[0].json.groupingConfig ?? { unit_strategy: 'excel_row' };\nconst analysisText = items[0].json.analysisText ?? '';\n\nconst out = autoGroup(rawItems, groupingConfig, analysisText);\n\nreturn [{ json: out }];"
+      }
+    },
+    {
+      "id": "7",
+      "name": "Summarize Proposal",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2440, 300],
+      "parameters": {
+        "functionCode": "const { summarizeProposal } = require('/data/src');\n\nconst patientCandidates = items[0].json.patientCandidates ?? [];\nconst groupingConfig = items[0].json.groupingConfig ?? {};\nconst analysisText = items[0].json.analysisText ?? '';\n\nconst { summary } = summarizeProposal(patientCandidates, groupingConfig, analysisText);\n\nreturn [{\n  json: {\n    ...items[0].json,\n    summary\n  }\n}];"
+      }
+    },
+    {
+      "id": "8",
+      "name": "Apply Reorg (Webhook)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [260, 760],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "staffbotics-reorg",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "9",
+      "name": "NL → Operations (LLM)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [620, 760],
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "method": "POST",
+        "authentication": "none",
+        "jsonParameters": true,
+        "sendHeaders": true,
+        "headerParametersJson": "{\n  \"Authorization\": \"Bearer {{$env.OPENAI_API_KEY}}\",\n  \"Content-Type\": \"application/json\"\n}",
+        "bodyParametersJson": "{\n  \"model\": \"gpt-5.2-mini\",\n  \"temperature\": 0,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You output ONLY valid JSON array (no markdown, no prose).\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Convert the instruction into an operations JSON array with schema: [{op:'merge'|'reassign'|'change_strategy', params:{...}}].\\n\\nInstruction:\\n{{$node[\\\"Apply Reorg (Webhook)\\\"].json.body.instruction}}\\n\\nValid candidate_ids:\\n{{JSON.stringify(($node[\\\"Apply Reorg (Webhook)\\\"].json.body.patientCandidates||[]).map(c=>c.candidate_id))}}\\n\\nValid raw_item ids:\\n{{JSON.stringify(($node[\\\"Apply Reorg (Webhook)\\\"].json.body.patientCandidates||[]).flatMap(c=>(c.raw_items||[]).map(r=>r.id)))}}\\n\\nRules:\\n- Use only valid IDs from the lists.\\n- merge params: {from:[candidate_id...], into:candidate_id}\\n- reassign params: {raw_item_id:rawItemId, new_candidate:candidate_id}\\n- change_strategy params: {unit_strategy:'excel_row'|'subfolder'|'id_in_filename'|'fallback'}\\nReturn JSON array only.\"\n    }\n  ]\n}",
+        "options": {}
+      }
+    },
+    {
+      "id": "10",
+      "name": "Apply Operations",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [980, 760],
+      "parameters": {
+        "functionCode": "const { applyOperations } = require('/data/src');\n\nfunction safeParseJsonArray(text) {\n  if (!text || typeof text !== 'string') return [];\n  try {\n    const parsed = JSON.parse(text);\n    return Array.isArray(parsed) ? parsed : [];\n  } catch (e) {}\n  const m = text.match(/\\[[\\s\\S]*\\]/);\n  if (m) {\n    try {\n      const parsed = JSON.parse(m[0]);\n      return Array.isArray(parsed) ? parsed : [];\n    } catch (e) {}\n  }\n  return [];\n}\n\n// Reorg webhook payload (the state the user sends in)\nconst payload = $node['Apply Reorg (Webhook)'].json.body ?? {};\nconst patientCandidates = payload.patientCandidates ?? [];\nconst rawItems = payload.rawItems ?? [];\nconst userInstruction = payload.instruction ?? '';\n\n// LLM operations response content\nconst llmResp = items[0].json;\nconst content = llmResp?.choices?.[0]?.message?.content ?? '';\nconst operations = safeParseJsonArray(content);\n\n// Build lookup for rawItems to repair reassign stubs\nconst rawItemById = {};\nfor (const ri of rawItems) rawItemById[ri.id] = ri;\n\nconst out = applyOperations(patientCandidates, operations, userInstruction);\n\n// Repair stubs produced by applyOperations(reassign)\nfor (const pc of out.patientCandidates || []) {\n  pc.raw_items = (pc.raw_items || []).map(ri => {\n    if (ri && ri.source_ref === 'reassigned' && rawItemById[ri.id]) return rawItemById[ri.id];\n    return ri;\n  });\n}\n\nreturn [{\n  json: {\n    patientCandidates: out.patientCandidates,\n    operationsApplied: out.operationsApplied,\n    userInstruction,\n    rawItems,\n    llm_raw: content\n  }\n}];"
+      }
+    }
+  ],
+  "connections": {
+    "Receive Batch (Webhook)": {
+      "main": [
+        [
+          {
+            "node": "Build RawItems",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build RawItems": {
+      "main": [
+        [
+          {
+            "node": "Heuristic Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Heuristic Analysis": {
+      "main": [
+        [
+          {
+            "node": "Structure Advisor (LLM)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structure Advisor (LLM)": {
+      "main": [
+        [
+          {
+            "node": "Parse LLM Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse LLM Config": {
+      "main": [
+        [
+          {
+            "node": "Auto Grouping",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto Grouping": {
+      "main": [
+        [
+          {
+            "node": "Summarize Proposal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Reorg (Webhook)": {
+      "main": [
+        [
+          {
+            "node": "NL → Operations (LLM)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NL → Operations (LLM)": {
+      "main": [
+        [
+          {
+            "node": "Apply Operations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "versionId": "staffbotics-patient-grouping-v1",
+  "id": "1",
+  "meta": {
+    "instanceId": "staffbotics-template"
+  },
+  "active": false
+}
