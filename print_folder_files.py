@@ -91,6 +91,13 @@ def process_file(file_path, out_file):
 relative_paths = [
     "src/",
     "workflows/staffbotics.json",
+    "data/",
+    "docker-compose.yml",
+    "import-overwrite.sh",
+    "README.md",
+    "scripts/",
+    "entrypoint.sh",
+
 ]
 
 # Define the list of excluded file extensions and folder names

@@ -1,241 +1,48 @@
 
 --------------------------------------------------------------------------------
-NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/grouping.js
-TOTAL LINES: 229
-FILE NAME: grouping.js
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/index.js
+TOTAL LINES: 35
+FILE NAME: index.js
 FILE EXTENSION: .js
 --------------------------------------------------------------------------------
-// src/grouping.js
-// LLM usage: autoGroup(rawItems, groupingConfig, analysisText) -> { patientCandidates, groupingConfig, analysisText, rawItems }
-/**
- * Helper: create a base PatientCandidate object.
- */
-function createCandidate(candidateId, inferredKey) {
-    return {
-      candidate_id: candidateId,
-      inferred_key: inferredKey,
-      inferred_identifiers: {},
-      raw_items: [],
-      confidence: 0.8,
-      notes: []
-    };
-  }
-  
-  /**
-   * Helper: extract identifiers from an Excel row.
-   * We try to infer patient_id, name, dob using very simple name heuristics.
-   */
-  function extractIdentifiersFromRow(row = {}) {
-    const ident = {};
-    Object.keys(row || {}).forEach((k) => {
-      const lk = k.toLowerCase();
-      const value = row[k];
-  
-      if (
-        lk.includes("nhc") ||
-        lk.includes("historia") ||
-        lk === "id" ||
-        lk.endsWith("_id")
-      ) {
-        ident.patient_id = value;
-      }
-      if (lk.includes("name") || lk.includes("nom")) {
-        ident.name = value;
-      }
-      if (lk.includes("birth") || lk.includes("dob") || lk.includes("naixement")) {
-        ident.dob = value;
-      }
-    });
-    return ident;
-  }
-  
-  /**
-   * Main grouping function.
-   *
-   * @param {Array} rawItems - list of RawItem
-   * @param {Object} groupingConfig - config suggested by LLM or defaults
-   * @param {string} analysisText - heuristic explanation (carried along)
-   *
-   * Returns:
-   * {
-   *   patientCandidates,
-   *   groupingConfig,
-   *   analysisText,
-   *   rawItems
-   * }
-   */
-  function autoGroup(rawItems = [], groupingConfig = {}, analysisText = "") {
-    const unitStrategy = groupingConfig.unit_strategy || "excel_row";
-    const excelCfg = groupingConfig.excel || {};
-    const folderCfg = groupingConfig.folder || {};
-  
-    const patientCandidates = [];
-  
-    // Strategy: excel_row
-    if (unitStrategy === "excel_row") {
-      const idColumn = excelCfg.id_column || null;
-  
-      // Create candidates from excel rows
-      rawItems
-        .filter((ri) => ri.source_type === "excel_row")
-        .forEach((ri) => {
-          const meta = ri.metadata || {};
-          const file = meta.file || "unknown_excel";
-          const rowIndex = meta.row_index ?? 0;
-          const row = meta.columns || {};
-          const candidateId = `${file}_row_${rowIndex}`;
-  
-          const pc = createCandidate(
-            candidateId,
-            `Excel row ${rowIndex} in ${file}`
-          );
-          const identifiers = extractIdentifiersFromRow(row);
-          if (idColumn && row[idColumn] !== undefined) {
-            if (!identifiers.patient_id) identifiers.patient_id = row[idColumn];
-          }
-          pc.inferred_identifiers = identifiers;
-          pc.raw_items.push(ri);
-          patientCandidates.push(pc);
-        });
-  
-      // Attach file-type rawItems by ID or name in filename
-      const fileItems = rawItems.filter((ri) => ri.source_type === "file");
-      fileItems.forEach((fi) => {
-        const meta = fi.metadata || {};
-        const filename = (meta.filename || "").toLowerCase();
-        let attached = false;
-  
-        for (const pc of patientCandidates) {
-          const ident = pc.inferred_identifiers || {};
-          const pid = String(ident.patient_id || "").toLowerCase();
-          const name = String(ident.name || "").toLowerCase();
-  
-          if (pid && filename.includes(pid)) {
-            pc.raw_items.push(fi);
-            attached = true;
-            break;
-          }
-          if (name) {
-            const token = name.split(/\s+/)[0];
-            if (token && filename.includes(token.toLowerCase())) {
-              pc.raw_items.push(fi);
-              attached = true;
-              break;
-            }
-          }
-        }
-  
-        if (!attached) {
-          const pc = createCandidate(
-            `file_only_${fi.id}`,
-            `Unassigned file ${meta.filename || fi.id}`
-          );
-          pc.raw_items.push(fi);
-          pc.confidence = 0.3;
-          pc.notes.push("Unassigned file; no matching patient found.");
-          patientCandidates.push(pc);
-        }
-      });
-    }
-  
-    // Strategy: subfolder
-    else if (unitStrategy === "subfolder") {
-      const folderMap = {};
-      rawItems
-        .filter((ri) => ri.source_type === "file")
-        .forEach((ri) => {
-          const meta = ri.metadata || {};
-          const folder = meta.folder_path || "root";
-          if (!folderMap[folder]) folderMap[folder] = [];
-          folderMap[folder].push(ri);
-        });
-  
-      Object.entries(folderMap).forEach(([folder, list]) => {
-        const pc = createCandidate(`folder::${folder}`, `Folder '${folder}'`);
-        pc.raw_items.push(...list);
-        pc.confidence = 0.85;
-        patientCandidates.push(pc);
-      });
-    }
-  
-    // Strategy: id_in_filename
-    else if (unitStrategy === "id_in_filename") {
-      const patterns = folderCfg.id_patterns || [];
-      const idMap = {};
-      const reCache = {};
-  
-      rawItems
-        .filter((ri) => ri.source_type === "file")
-        .forEach((ri) => {
-          const meta = ri.metadata || {};
-          const filename = meta.filename || "";
-          let matchedId = null;
-  
-          for (const pat of patterns) {
-            if (!reCache[pat]) {
-              try {
-                reCache[pat] = new RegExp(pat);
-              } catch (e) {
-                reCache[pat] = null;
-              }
-            }
-            const re = reCache[pat];
-            if (!re) continue;
-            const m = filename.match(re);
-            if (m) {
-              matchedId = m[0];
-              break;
-            }
-          }
-  
-          if (!matchedId) {
-            matchedId = `unassigned::${ri.id}`;
-          }
-  
-          if (!idMap[matchedId]) idMap[matchedId] = [];
-          idMap[matchedId].push(ri);
-        });
-  
-      Object.entries(idMap).forEach(([pid, list]) => {
-        const pc = createCandidate(`id::${pid}`, `ID from filename '${pid}'`);
-        pc.raw_items.push(...list);
-        if (!pid.startsWith("unassigned::")) {
-          pc.inferred_identifiers = { patient_id: pid };
-          pc.confidence = 0.8;
-        } else {
-          pc.confidence = 0.3;
-          pc.notes.push("Unassigned file; no ID pattern match.");
-        }
-        patientCandidates.push(pc);
-      });
-    }
-  
-    // Strategy: fallback
-    else {
-      rawItems.forEach((ri) => {
-        const pc = createCandidate(`single::${ri.id}`, `Single source item ${ri.id}`);
-        pc.raw_items.push(ri);
-        pc.confidence = 0.2;
-        pc.notes.push("Fallback grouping: one item per candidate.");
-        patientCandidates.push(pc);
-      });
-    }
-  
-    return {
-      patientCandidates,
-      groupingConfig,
-      analysisText,
-      rawItems
-    };
-  }
-  
-  module.exports = {
-    autoGroup,
-    extractIdentifiersFromRow
-  };
-  
+// src/index.js
+const { buildRawItemsFromWebhookBody, buildHeuristicAnalysis } = require("./ingestion");
+const { autoGroup, extractIdentifiersFromRow } = require("./grouping");
+const { applyOperations } = require("./operations");
+const { summarizeProposal } = require("./summary");
+
+// (Optional) expose identity helpers for debugging/testing
+const {
+  normText,
+  normId,
+  normDate,
+  buildPatientKey,
+  filenameContainsId,
+  filenameMatchesName,
+  tokens
+} = require("./identity");
+
+module.exports = {
+  // pipeline
+  buildRawItemsFromWebhookBody,
+  buildHeuristicAnalysis,
+  autoGroup,
+  applyOperations,
+  summarizeProposal,
+
+  // optional helpers
+  extractIdentifiersFromRow,
+  normText,
+  normId,
+  normDate,
+  buildPatientKey,
+  filenameContainsId,
+  filenameMatchesName,
+  tokens
+};
+
 --------------------------------------------------------------------------------
-NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/rawItems.js
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/ingestion/rawItems.js
 TOTAL LINES: 74
 FILE NAME: rawItems.js
 FILE EXTENSION: .js
@@ -315,168 +122,720 @@ function buildRawItemsFromWebhookBody(body = {}) {
   };
   
 --------------------------------------------------------------------------------
-NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/heuristics.js
-TOTAL LINES: 90
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/ingestion/heuristics.js
+TOTAL LINES: 109
 FILE NAME: heuristics.js
 FILE EXTENSION: .js
 --------------------------------------------------------------------------------
 // src/heuristics.js
-// LLM usage: buildHeuristicAnalysis(originalBody) -> { analysisText }
-/**
- * Analyze the originalBody (excelFiles + files) and produce a human-readable
- * analysisText describing candidate ID columns and folder structure.
- *
- * Returns: { analysisText }
- */
 function buildHeuristicAnalysis(originalBody = {}) {
-    const excelFiles = originalBody.excelFiles || [];
-    const files = originalBody.files || [];
-  
-    const analysisLines = [];
-  
-    // Excel analysis
-    excelFiles.forEach((ef, efIndex) => {
-      const fileName = ef.name || `excel_${efIndex}`;
-      const rows = ef.rows || [];
-      analysisLines.push(`Excel file '${fileName}' with ${rows.length} rows.`);
-  
-      if (rows.length) {
-        const colNames = Object.keys(rows[0]);
-        analysisLines.push(`Columns: ${JSON.stringify(colNames)}`);
-  
-        const colStats = colNames.map((col) => {
-          const values = rows.map((r) => String(r[col]));
-          const nonNull = values.filter(
-            (v) =>
-              v !== null &&
-              v !== undefined &&
-              v !== "" &&
-              v !== "null" &&
-              v !== "None"
-          );
-          const distinct = new Set(nonNull);
-          const uniqueness = nonNull.length ? distinct.size / nonNull.length : 0.0;
-          const nullRatio = values.length
-            ? 1.0 - nonNull.length / values.length
-            : 0.0;
-          return { name: col, uniqueness, nullRatio };
-        });
-  
-        colStats.sort((a, b) => {
-          if (b.uniqueness !== a.uniqueness) return b.uniqueness - a.uniqueness;
-          return a.nullRatio - b.nullRatio;
-        });
-  
-        if (colStats.length) {
-          const best = colStats[0];
-          analysisLines.push(
-            `Best ID-like column candidate: '${best.name}' (uniqueness=${best.uniqueness.toFixed(
-              2
-            )}, null_ratio=${best.nullRatio.toFixed(2)}).`
-          );
-        }
-      }
-    });
-  
-    // Folder structure analysis
-    const folderCounts = {};
-    files.forEach((f) => {
-      const path = f.path || f.fullPath || f.filename;
-      if (!path) return;
-      const parts = path.split("/");
-      if (parts.length > 1) {
-        const folder = parts.slice(0, -1).join("/");
-        folderCounts[folder] = (folderCounts[folder] || 0) + 1;
-      }
-    });
-  
-    if (Object.keys(folderCounts).length) {
-      analysisLines.push("Folder structure:");
-      Object.entries(folderCounts)
-        .slice(0, 20)
-        .forEach(([folder, count]) => {
-          analysisLines.push(` - Folder '${folder}' has ${count} files.`);
-        });
-    }
-  
-    const analysisText = analysisLines.length
-      ? analysisLines.join("\n")
-      : "No strong structure detected.";
-  
-    return { analysisText };
+  const excelFiles = originalBody.excelFiles || [];
+  const files = originalBody.files || [];
+
+  const analysisLines = [];
+
+  const blacklist = new Set([
+    "tumor_id", "lesion_id", "sample_id", "biopsy_id",
+    "study_id", "trial_id", "center_id", "visit_id", "episode_id"
+  ]);
+
+  function idLikelihood(colName) {
+    const lk = String(colName).toLowerCase();
+    if (blacklist.has(lk)) return -10;
+
+    let score = 0;
+    if (lk === "nhc" || lk.includes("nhc")) score += 6;
+    if (lk.includes("historia") || lk.includes("hc")) score += 4;
+    if (lk.includes("patient") && lk.includes("id")) score += 6;
+    if (lk.includes("id_paciente") || lk.includes("idpaciente")) score += 6;
+    if (lk === "patient_id") score += 8;
+
+    if (lk === "id") score += 1;
+    if (lk.endsWith("_id")) score += 0; // neutral now (was dangerous)
+
+    if (lk.includes("tumor") || lk.includes("lesion") || lk.includes("sample")) score -= 6;
+    if (lk.includes("study") || lk.includes("trial") || lk.includes("center")) score -= 6;
+
+    return score;
   }
-  
-  module.exports = {
-    buildHeuristicAnalysis
-  };
-  
+
+  // Excel analysis
+  excelFiles.forEach((ef, efIndex) => {
+    const fileName = ef.name || `excel_${efIndex}`;
+    const rows = ef.rows || [];
+    analysisLines.push(`Excel file '${fileName}' with ${rows.length} rows.`);
+
+    if (rows.length) {
+      const colNames = Object.keys(rows[0]);
+      analysisLines.push(`Columns: ${JSON.stringify(colNames)}`);
+
+      const colStats = colNames.map((col) => {
+        const values = rows.map((r) => String(r[col]));
+        const nonNull = values.filter(
+          (v) =>
+            v !== null &&
+            v !== undefined &&
+            v !== "" &&
+            v !== "null" &&
+            v !== "None"
+        );
+        const distinct = new Set(nonNull);
+        const uniqueness = nonNull.length ? distinct.size / nonNull.length : 0.0;
+        const nullRatio = values.length ? 1.0 - nonNull.length / values.length : 0.0;
+
+        const like = idLikelihood(col);
+        return { name: col, uniqueness, nullRatio, like };
+      });
+
+      colStats.sort((a, b) => {
+        // prioritize id-likeness, then uniqueness, then null ratio
+        if (b.like !== a.like) return b.like - a.like;
+        if (b.uniqueness !== a.uniqueness) return b.uniqueness - a.uniqueness;
+        return a.nullRatio - b.nullRatio;
+      });
+
+      if (colStats.length) {
+        const best = colStats[0];
+        analysisLines.push(
+          `Best ID-like column candidate: '${best.name}' (id_likeness=${best.like}, uniqueness=${best.uniqueness.toFixed(
+            2
+          )}, null_ratio=${best.nullRatio.toFixed(2)}).`
+        );
+      }
+    }
+  });
+
+  // Folder structure analysis
+  const folderCounts = {};
+  files.forEach((f) => {
+    const path = f.path || f.fullPath || f.filename;
+    if (!path) return;
+    const parts = path.split("/");
+    if (parts.length > 1) {
+      const folder = parts.slice(0, -1).join("/");
+      folderCounts[folder] = (folderCounts[folder] || 0) + 1;
+    }
+  });
+
+  if (Object.keys(folderCounts).length) {
+    analysisLines.push("Folder structure:");
+    Object.entries(folderCounts)
+      .slice(0, 20)
+      .forEach(([folder, count]) => {
+        analysisLines.push(` - Folder '${folder}' has ${count} files.`);
+      });
+  }
+
+  const analysisText = analysisLines.length
+    ? analysisLines.join("\n")
+    : "No strong structure detected.";
+
+  return { analysisText };
+}
+
+module.exports = {
+  buildHeuristicAnalysis
+};
+
 --------------------------------------------------------------------------------
-NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/index.js
-TOTAL LINES: 16
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/ingestion/index.js
+TOTAL LINES: 8
 FILE NAME: index.js
 FILE EXTENSION: .js
 --------------------------------------------------------------------------------
-// src/index.js
-// LLM usage: require('/data/src') to get all helpers in one import.
+// src/ingestion/index.js
 const { buildRawItemsFromWebhookBody } = require("./rawItems");
 const { buildHeuristicAnalysis } = require("./heuristics");
-const { autoGroup, extractIdentifiersFromRow } = require("./grouping");
-const { summarizeProposal } = require("./summary");
-const { applyOperations } = require("./operations");
 
 module.exports = {
   buildRawItemsFromWebhookBody,
-  buildHeuristicAnalysis,
+  buildHeuristicAnalysis
+};
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/identity/normalize.js
+TOTAL LINES: 48
+FILE NAME: normalize.js
+FILE EXTENSION: .js
+--------------------------------------------------------------------------------
+// src/normalize.js
+const crypto = require("crypto");
+
+function stripDiacritics(s) {
+  return (s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function normText(s) {
+  return stripDiacritics(String(s ?? ""))
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function normId(s) {
+  // normalize ids: remove spaces, keep alnum and basic separators
+  const t = normText(s);
+  return t.replace(/[^a-z0-9_-]/g, "");
+}
+
+function normDate(s) {
+  // extremely defensive normalization: keep digits and separators; do not parse fully here
+  const t = normText(s);
+  if (!t) return "";
+  return t.replace(/[^0-9/-]/g, "");
+}
+
+function sha1(s) {
+  return crypto.createHash("sha1").update(String(s)).digest("hex");
+}
+
+function buildPatientKey(ident = {}) {
+  // Priority: patient_id > (name+dob) > name > fallback empty
+  const pid = normId(ident.patient_id || "");
+  const name = normText(ident.name || "");
+  const dob = normDate(ident.dob || "");
+  if (pid) return { patient_key: sha1(`pid:${pid}`), match_key_type: "patient_id" };
+  if (name && dob) return { patient_key: sha1(`name_dob:${name}|${dob}`), match_key_type: "name_dob" };
+  if (name) return { patient_key: sha1(`name:${name}`), match_key_type: "name" };
+  return { patient_key: sha1(`unknown:${Math.random()}`), match_key_type: "unknown" };
+}
+
+module.exports = {
+  normText,
+  normId,
+  normDate,
+  buildPatientKey,
+};
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/identity/index.js
+TOTAL LINES: 13
+FILE NAME: index.js
+FILE EXTENSION: .js
+--------------------------------------------------------------------------------
+// src/identity/index.js
+const { normText, normId, normDate, buildPatientKey } = require("./normalize");
+const { filenameContainsId, filenameMatchesName, tokens } = require("./matching");
+
+module.exports = {
+  normText,
+  normId,
+  normDate,
+  buildPatientKey,
+  filenameContainsId,
+  filenameMatchesName,
+  tokens
+};
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/identity/matching.js
+TOTAL LINES: 64
+FILE NAME: matching.js
+FILE EXTENSION: .js
+--------------------------------------------------------------------------------
+// src/matching.js
+const { normText, normId } = require("./normalize");
+
+/**
+ * Tokenize filename-like strings into safe tokens (alnum runs).
+ */
+function tokens(s) {
+  const t = normText(s);
+  if (!t) return [];
+  return t.split(/[^a-z0-9]+/g).filter(Boolean);
+}
+
+/**
+ * Boundary-safe check: does normalized filename contain id as a whole token
+ * OR as a boundary-delimited substring (non-alnum around it).
+ */
+function filenameContainsId(filename, patientId) {
+  const fid = normText(filename);
+  const pid = normId(patientId);
+  if (!pid) return false;
+
+  const toks = tokens(fid);
+  if (toks.includes(pid)) return true;
+
+  // Boundary-delimited substring match (avoid 123 matching 1234)
+  const re = new RegExp(`(^|[^a-z0-9])${pid}([^a-z0-9]|$)`, "i");
+  return re.test(fid);
+}
+
+/**
+ * Stronger name match:
+ * - requires at least first token
+ * - if last token exists, prefer (first+last) both present
+ * - diacritics-insensitive via normalize()
+ */
+function filenameMatchesName(filename, name) {
+  const fnToks = new Set(tokens(filename));
+  const n = normText(name);
+  if (!n) return false;
+
+  const nameToks = n.split(" ").filter(Boolean);
+  if (!nameToks.length) return false;
+
+  const first = nameToks[0];
+  const last = nameToks.length > 1 ? nameToks[nameToks.length - 1] : "";
+
+  // Avoid super-common short tokens like "de", "la", "del"
+  const stop = new Set(["de", "la", "del", "da", "do", "dos", "das", "van", "von"]);
+  const firstOk = first.length >= 3 && !stop.has(first);
+
+  if (!firstOk) return false;
+
+  if (last && last.length >= 3 && !stop.has(last)) {
+    return fnToks.has(first) && fnToks.has(last);
+  }
+
+  return fnToks.has(first);
+}
+
+module.exports = {
+  filenameContainsId,
+  filenameMatchesName,
+  tokens,
+};
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/grouping/grouping.js
+TOTAL LINES: 402
+FILE NAME: grouping.js
+FILE EXTENSION: .js
+--------------------------------------------------------------------------------
+// src/grouping.js
+// LLM usage: autoGroup(rawItems, groupingConfig, analysisText) -> { patientCandidates, groupingConfig, analysisText, rawItems }
+
+const { buildPatientKey, normId, normText } = require("../identity/normalize");
+const { filenameContainsId, filenameMatchesName } = require("../identity/matching");
+
+/**
+ * Helper: create a base PatientCandidate object.
+ */
+function createCandidate(candidateId, inferredKey) {
+  return {
+    candidate_id: candidateId,
+    inferred_key: inferredKey,
+    inferred_identifiers: {},
+    normalized_identifiers: {},
+    patient_key: null,
+    match_key_type: null,
+    raw_items: [],
+    confidence: 0.8,
+    status: "ready", // 'ready' | 'quarantine'
+    issues: [],
+    notes: []
+  };
+}
+
+/**
+ * Scored identifier extraction to avoid picking tumor_id/study_id/etc.
+ */
+function extractIdentifiersFromRow(row = {}) {
+  const keys = Object.keys(row || {});
+  const scored = [];
+
+  const blacklisted = [
+    "study_id", "trial_id", "center_id", "hospital_id",
+    "tumor_id", "lesion_id", "biopsy_id", "sample_id",
+    "visit_id", "episode_id", "treatment_id"
+  ];
+
+  function scoreKey(lk) {
+    let score = 0;
+
+    if (blacklisted.includes(lk)) return -100;
+
+    // strong patient id hints
+    if (lk === "nhc" || lk.includes("nhc")) score += 10;
+    if (lk.includes("historia") || lk.includes("hc")) score += 6;
+    if (lk.includes("patient") && lk.includes("id")) score += 10;
+    if (lk.includes("id_paciente") || lk.includes("idpaciente")) score += 10;
+    if (lk === "patient_id") score += 12;
+
+    // weak generic "id"
+    if (lk === "id") score += 3;
+    if (lk.endsWith("_id")) score += 1;
+
+    // punish obvious non-patient id contexts
+    if (lk.includes("tumor") || lk.includes("lesion") || lk.includes("sample")) score -= 8;
+    if (lk.includes("study") || lk.includes("trial") || lk.includes("center")) score -= 8;
+
+    return score;
+  }
+
+  // patient_id candidate
+  keys.forEach((k) => {
+    const lk = String(k).toLowerCase().trim();
+    scored.push({ k, lk, score: scoreKey(lk), value: row[k] });
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+
+  const ident = {};
+  const bestPid = scored.find(x => x.score >= 6 && x.value !== undefined && x.value !== null && String(x.value).trim() !== "");
+  if (bestPid) ident.patient_id = bestPid.value;
+
+  // name
+  for (const k of keys) {
+    const lk = String(k).toLowerCase();
+    if (lk.includes("name") || lk.includes("nom") || lk.includes("cognom") || lk.includes("apellido")) {
+      const v = row[k];
+      if (v !== undefined && v !== null && String(v).trim() !== "") {
+        ident.name = v;
+        break;
+      }
+    }
+  }
+
+  // dob
+  for (const k of keys) {
+    const lk = String(k).toLowerCase();
+    if (lk.includes("birth") || lk.includes("dob") || lk.includes("naixement") || lk.includes("fecha_nacimiento")) {
+      const v = row[k];
+      if (v !== undefined && v !== null && String(v).trim() !== "") {
+        ident.dob = v;
+        break;
+      }
+    }
+  }
+
+  return ident;
+}
+
+/**
+ * Normalize identifiers for consistent matching/hashing.
+ */
+function normalizeIdentifiers(ident = {}) {
+  return {
+    patient_id: normId(ident.patient_id || ""),
+    name: normText(ident.name || ""),
+    dob: String(ident.dob ?? "").trim()
+  };
+}
+
+/**
+ * Extract ID from filename using patterns.
+ * patterns can be:
+ * - string regex  (backward compatible) -> uses match[0]
+ * - { pattern: string, group?: number } -> uses match[group||0]
+ */
+function extractIdFromFilename(filename = "", patterns = []) {
+  const reCache = new Map();
+
+  function getRe(pat) {
+    if (reCache.has(pat)) return reCache.get(pat);
+    try {
+      const re = new RegExp(pat, "i");
+      reCache.set(pat, re);
+      return re;
+    } catch (e) {
+      reCache.set(pat, null);
+      return null;
+    }
+  }
+
+  for (const p of patterns) {
+    if (!p) continue;
+
+    let pat = p;
+    let group = 0;
+    if (typeof p === "object") {
+      pat = p.pattern;
+      group = Number.isInteger(p.group) ? p.group : 0;
+    }
+
+    if (typeof pat !== "string" || !pat) continue;
+    const re = getRe(pat);
+    if (!re) continue;
+
+    const m = String(filename).match(re);
+    if (m) {
+      const g = m[group] ?? m[0];
+      const cleaned = normId(g);
+      if (cleaned) return cleaned;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Quarantine rules:
+ * - confidence < threshold
+ * - missing both patient_id and (name+dob)
+ * - “id-like” collisions / suspicious ids
+ */
+function finalizeCandidate(pc, cfg = {}) {
+  const qThresh = cfg.quarantine_threshold ?? 0.55;
+
+  const ni = pc.normalized_identifiers || {};
+  const hasPid = !!ni.patient_id;
+  const hasNameDob = !!(ni.name && ni.dob);
+
+  if (!hasPid && !hasNameDob) {
+    pc.issues.push("No reliable identifiers (needs patient_id or name+dob).");
+    pc.confidence = Math.min(pc.confidence, 0.35);
+  }
+
+  // suspicious short numeric IDs (common source of false matches)
+  if (hasPid && /^\d+$/.test(ni.patient_id) && ni.patient_id.length < 4) {
+    pc.issues.push("Patient ID looks too short; high collision risk.");
+    pc.confidence = Math.min(pc.confidence, 0.45);
+  }
+
+  if ((pc.confidence ?? 0) < qThresh) {
+    pc.status = "quarantine";
+  }
+
+  return pc;
+}
+
+/**
+ * Main grouping function.
+ */
+function autoGroup(rawItems = [], groupingConfig = {}, analysisText = "") {
+  const unitStrategy = groupingConfig.unit_strategy || "excel_row";
+  const excelCfg = groupingConfig.excel || {};
+  const folderCfg = groupingConfig.folder || {};
+  const quarantineCfg = groupingConfig.quarantine || {};
+
+  const patientCandidates = [];
+
+  // Strategy: excel_row (now: group rows by patient key, not one row == one patient)
+  if (unitStrategy === "excel_row") {
+    const idColumn = excelCfg.id_column || null;
+
+    // 1) Build candidates from excel rows but GROUP them
+    const grouped = new Map(); // key -> candidate
+
+    rawItems
+      .filter((ri) => ri.source_type === "excel_row")
+      .forEach((ri) => {
+        const meta = ri.metadata || {};
+        const file = meta.file || "unknown_excel";
+        const rowIndex = meta.row_index ?? 0;
+        const row = meta.columns || {};
+
+        const identifiers = extractIdentifiersFromRow(row);
+        if (idColumn && row[idColumn] !== undefined && row[idColumn] !== null && String(row[idColumn]).trim() !== "") {
+          if (!identifiers.patient_id) identifiers.patient_id = row[idColumn];
+        }
+
+        const normIdent = normalizeIdentifiers(identifiers);
+        const keyInfo = buildPatientKey(normIdent);
+        const patientKey = keyInfo.patient_key;
+
+        const groupKey = `${file}::${patientKey}`; // avoid collisions across different excel files
+
+        if (!grouped.has(groupKey)) {
+          const pc = createCandidate(`excel::${file}::${patientKey}`, `Excel patient group in ${file}`);
+          pc.inferred_identifiers = identifiers;
+          pc.normalized_identifiers = normIdent;
+          pc.patient_key = patientKey;
+          pc.match_key_type = keyInfo.match_key_type;
+          pc.raw_items.push(ri);
+          pc.confidence = 0.8;
+          grouped.set(groupKey, pc);
+        } else {
+          const pc = grouped.get(groupKey);
+          pc.raw_items.push(ri);
+
+          // merge identifiers if missing
+          pc.inferred_identifiers = pc.inferred_identifiers || {};
+          if (!pc.inferred_identifiers.patient_id && identifiers.patient_id) pc.inferred_identifiers.patient_id = identifiers.patient_id;
+          if (!pc.inferred_identifiers.name && identifiers.name) pc.inferred_identifiers.name = identifiers.name;
+          if (!pc.inferred_identifiers.dob && identifiers.dob) pc.inferred_identifiers.dob = identifiers.dob;
+
+          pc.normalized_identifiers = normalizeIdentifiers(pc.inferred_identifiers);
+          const newKey = buildPatientKey(pc.normalized_identifiers);
+          pc.patient_key = newKey.patient_key;
+          pc.match_key_type = newKey.match_key_type;
+
+          // slight confidence boost for multi-row evidence
+          pc.confidence = Math.min(0.92, (pc.confidence || 0.8) + 0.03);
+        }
+      });
+
+    // No excel rows? keep empty for now; files will become file_only
+    patientCandidates.push(...Array.from(grouped.values()));
+
+    // 2) Attach file items to candidates using safer matching
+    const fileItems = rawItems.filter((ri) => ri.source_type === "file");
+
+    fileItems.forEach((fi) => {
+      const meta = fi.metadata || {};
+      const filename = meta.filename || "";
+      let best = null;
+      let bestScore = 0;
+
+      for (const pc of patientCandidates) {
+        const ni = pc.normalized_identifiers || {};
+        const pid = ni.patient_id || "";
+        const name = pc.inferred_identifiers?.name || "";
+
+        let score = 0;
+
+        if (pid && filenameContainsId(filename, pid)) score += 10;
+        if (name && filenameMatchesName(filename, name)) score += 4;
+
+        if (score > bestScore) {
+          bestScore = score;
+          best = pc;
+        }
+      }
+
+      if (best && bestScore >= 6) {
+        best.raw_items.push(fi);
+        best.confidence = Math.min(0.95, (best.confidence || 0.8) + 0.02);
+      } else {
+        const pc = createCandidate(`file_only_${fi.id}`, `Unassigned file ${meta.filename || fi.id}`);
+        pc.raw_items.push(fi);
+        pc.confidence = 0.3;
+        pc.status = "quarantine";
+        pc.issues.push("Unassigned file; no confident patient match.");
+        patientCandidates.push(pc);
+      }
+    });
+
+    // finalize
+    patientCandidates.forEach(pc => finalizeCandidate(pc, quarantineCfg));
+  }
+
+  // Strategy: subfolder (now: confidence depends on folder “patient-likeness”)
+  else if (unitStrategy === "subfolder") {
+    const patterns = folderCfg.id_patterns || [];
+    const folderMap = {};
+
+    rawItems
+      .filter((ri) => ri.source_type === "file")
+      .forEach((ri) => {
+        const meta = ri.metadata || {};
+        const folder = meta.folder_path || "root";
+        if (!folderMap[folder]) folderMap[folder] = [];
+        folderMap[folder].push(ri);
+      });
+
+    Object.entries(folderMap).forEach(([folder, list]) => {
+      const pc = createCandidate(`folder::${folder}`, `Folder '${folder}'`);
+      pc.raw_items.push(...list);
+
+      // Extract patient id from folder leaf if possible
+      const leaf = String(folder).split("/").slice(-1)[0];
+      const extracted = extractIdFromFilename(leaf, patterns);
+      if (extracted) {
+        pc.inferred_identifiers = { patient_id: extracted };
+        pc.normalized_identifiers = normalizeIdentifiers(pc.inferred_identifiers);
+        const keyInfo = buildPatientKey(pc.normalized_identifiers);
+        pc.patient_key = keyInfo.patient_key;
+        pc.match_key_type = keyInfo.match_key_type;
+        pc.confidence = 0.85;
+      } else {
+        // Folder might be batch/date/hospital rather than patient
+        pc.confidence = 0.55;
+        pc.issues.push("Folder grouping used but folder name does not look patient-specific.");
+      }
+
+      finalizeCandidate(pc, quarantineCfg);
+      patientCandidates.push(pc);
+    });
+  }
+
+  // Strategy: id_in_filename (now: supports capture groups)
+  else if (unitStrategy === "id_in_filename") {
+    const patterns = folderCfg.id_patterns || [];
+    const idMap = {};
+
+    rawItems
+      .filter((ri) => ri.source_type === "file")
+      .forEach((ri) => {
+        const meta = ri.metadata || {};
+        const filename = meta.filename || "";
+        const matchedId = extractIdFromFilename(filename, patterns);
+
+        const key = matchedId ? `id::${matchedId}` : `unassigned::${ri.id}`;
+        if (!idMap[key]) idMap[key] = [];
+        idMap[key].push(ri);
+      });
+
+    Object.entries(idMap).forEach(([key, list]) => {
+      const pc = createCandidate(key, `ID grouping '${key}'`);
+      pc.raw_items.push(...list);
+
+      if (key.startsWith("id::")) {
+        const pid = key.replace(/^id::/, "");
+        pc.inferred_identifiers = { patient_id: pid };
+        pc.normalized_identifiers = normalizeIdentifiers(pc.inferred_identifiers);
+        const keyInfo = buildPatientKey(pc.normalized_identifiers);
+        pc.patient_key = keyInfo.patient_key;
+        pc.match_key_type = keyInfo.match_key_type;
+        pc.confidence = 0.82;
+      } else {
+        pc.confidence = 0.3;
+        pc.status = "quarantine";
+        pc.issues.push("Unassigned file; no ID pattern match.");
+      }
+
+      finalizeCandidate(pc, quarantineCfg);
+      patientCandidates.push(pc);
+    });
+  }
+
+  // Strategy: fallback
+  else {
+    rawItems.forEach((ri) => {
+      const pc = createCandidate(`single::${ri.id}`, `Single source item ${ri.id}`);
+      pc.raw_items.push(ri);
+      pc.confidence = 0.2;
+      pc.status = "quarantine";
+      pc.issues.push("Fallback grouping: one item per candidate.");
+      patientCandidates.push(pc);
+    });
+  }
+
+  return {
+    patientCandidates,
+    groupingConfig,
+    analysisText,
+    rawItems
+  };
+}
+
+module.exports = {
   autoGroup,
-  extractIdentifiersFromRow,
-  summarizeProposal,
+  extractIdentifiersFromRow
+};
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/grouping/index.js
+TOTAL LINES: 7
+FILE NAME: index.js
+FILE EXTENSION: .js
+--------------------------------------------------------------------------------
+// src/grouping/index.js
+const { autoGroup, extractIdentifiersFromRow } = require("./grouping");
+
+module.exports = {
+  autoGroup,
+  extractIdentifiersFromRow
+};
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/operations/index.js
+TOTAL LINES: 6
+FILE NAME: index.js
+FILE EXTENSION: .js
+--------------------------------------------------------------------------------
+// src/operations/index.js
+const { applyOperations } = require("./operations");
+
+module.exports = {
   applyOperations
 };
 
 --------------------------------------------------------------------------------
-NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/summary.js
-TOTAL LINES: 36
-FILE NAME: summary.js
-FILE EXTENSION: .js
---------------------------------------------------------------------------------
-// src/summary.js
-// LLM usage: summarizeProposal(patientCandidates, groupingConfig, analysisText) -> { summary }
-/**
- * Build a human-readable summary of the proposed grouping.
- *
- * @param {Array} patientCandidates
- * @param {Object} groupingConfig
- * @param {string} analysisText
- *
- * Returns: { summary }
- */
-function summarizeProposal(patientCandidates = [], groupingConfig = {}, analysisText = "") {
-    const summaryLines = [];
-  
-    summaryLines.push("Proposed patient grouping structure:");
-    summaryLines.push(`- Strategy: ${groupingConfig.unit_strategy}`);
-    summaryLines.push(`- Excel config: ${JSON.stringify(groupingConfig.excel || {})}`);
-    summaryLines.push(`- Folder config: ${JSON.stringify(groupingConfig.folder || {})}`);
-    summaryLines.push(`- Number of patient candidates: ${patientCandidates.length}`);
-  
-    const lowConf = patientCandidates.filter((pc) => (pc.confidence || 0) < 0.5);
-    summaryLines.push(`- Low confidence candidates (<0.5): ${lowConf.length}`);
-  
-    summaryLines.push("");
-    summaryLines.push("Heuristic analysis recap:");
-    summaryLines.push(analysisText || "(none)");
-  
-    const summary = summaryLines.join("\n");
-  
-    return { summary };
-  }
-  
-  module.exports = {
-    summarizeProposal
-  };
-  
---------------------------------------------------------------------------------
-NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/operations.js
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/operations/operations.js
 TOTAL LINES: 88
 FILE NAME: operations.js
 FILE EXTENSION: .js
@@ -570,6 +929,61 @@ function applyOperations(patientCandidates = [], operations = [], userInstructio
   };
   
 --------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/summary/index.js
+TOTAL LINES: 6
+FILE NAME: index.js
+FILE EXTENSION: .js
+--------------------------------------------------------------------------------
+// src/summary/index.js
+const { summarizeProposal } = require("./summary");
+
+module.exports = {
+  summarizeProposal
+};
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/src/summary/summary.js
+TOTAL LINES: 35
+FILE NAME: summary.js
+FILE EXTENSION: .js
+--------------------------------------------------------------------------------
+// src/summary.js
+function summarizeProposal(patientCandidates = [], groupingConfig = {}, analysisText = "") {
+  const summaryLines = [];
+
+  summaryLines.push("Proposed patient grouping structure:");
+  summaryLines.push(`- Strategy: ${groupingConfig.unit_strategy}`);
+  summaryLines.push(`- Excel config: ${JSON.stringify(groupingConfig.excel || {})}`);
+  summaryLines.push(`- Folder config: ${JSON.stringify(groupingConfig.folder || {})}`);
+  summaryLines.push(`- Number of patient candidates: ${patientCandidates.length}`);
+
+  const lowConf = patientCandidates.filter((pc) => (pc.confidence || 0) < 0.5);
+  const quarantine = patientCandidates.filter((pc) => pc.status === "quarantine");
+  summaryLines.push(`- Low confidence candidates (<0.5): ${lowConf.length}`);
+  summaryLines.push(`- Quarantined candidates: ${quarantine.length}`);
+
+  // Top issues
+  const issueCounts = {};
+  quarantine.forEach(pc => (pc.issues || []).forEach(i => issueCounts[i] = (issueCounts[i] || 0) + 1));
+  const topIssues = Object.entries(issueCounts).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  if (topIssues.length) {
+    summaryLines.push("- Top quarantine reasons:");
+    topIssues.forEach(([k,v]) => summaryLines.push(`  - ${k} (${v})`));
+  }
+
+  summaryLines.push("");
+  summaryLines.push("Heuristic analysis recap:");
+  summaryLines.push(analysisText || "(none)");
+
+  const summary = summaryLines.join("\n");
+  return { summary };
+}
+
+module.exports = {
+  summarizeProposal
+};
+
+--------------------------------------------------------------------------------
 NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/workflows/staffbotics.json
 TOTAL LINES: 222
 FILE NAME: staffbotics.json
@@ -598,7 +1012,7 @@ FILE EXTENSION: .json
       "typeVersion": 1,
       "position": [620, 300],
       "parameters": {
-        "functionCode": "const { buildRawItemsFromWebhookBody } = require('/data/src');\n\n// Webhook payload is usually in items[0].json.body, but handle both cases.\nconst payload = items[0].json.body ?? items[0].json;\n\nconst out = buildRawItemsFromWebhookBody(payload);\n\nreturn [{ json: out }];"
+        "functionCode": "const { buildRawItemsFromWebhookBody } = require('staffbotics-helpers');\n\n// Webhook payload is usually in items[0].json.body, but handle both cases.\nconst payload = items[0].json.body ?? items[0].json;\n\nconst out = buildRawItemsFromWebhookBody(payload);\n\nreturn [{ json: out }];"
       }
     },
     {
@@ -608,7 +1022,7 @@ FILE EXTENSION: .json
       "typeVersion": 1,
       "position": [980, 300],
       "parameters": {
-        "functionCode": "const { buildHeuristicAnalysis } = require('/data/src');\n\nconst originalBody = items[0].json.originalBody ?? {};\nconst { analysisText } = buildHeuristicAnalysis(originalBody);\n\nreturn [{\n  json: {\n    ...items[0].json,\n    analysisText\n  }\n}];"
+        "functionCode": "const { buildHeuristicAnalysis } = require('staffbotics-helpers');\n\nconst originalBody = items[0].json.originalBody ?? {};\nconst { analysisText } = buildHeuristicAnalysis(originalBody);\n\nreturn [{\n  json: {\n    ...items[0].json,\n    analysisText\n  }\n}];"
       }
     },
     {
@@ -624,10 +1038,10 @@ FILE EXTENSION: .json
         "jsonParameters": true,
         "sendHeaders": true,
         "headerParametersJson": "{\n  \"Authorization\": \"Bearer {{$env.OPENAI_API_KEY}}\",\n  \"Content-Type\": \"application/json\"\n}",
-        "bodyParametersJson": "{\n  \"model\": \"gpt-5.2-mini\",\n  \"temperature\": 0,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You output ONLY valid JSON (no markdown, no prose).\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"You are configuring a deterministic bulk-to-patient grouping step.\\n\\nReturn ONLY a JSON object with this schema:\\n{\\n  \\\"unit_strategy\\\": \\\"excel_row\\\"|\\\"subfolder\\\"|\\\"id_in_filename\\\"|\\\"fallback\\\",\\n  \\\"excel\\\": { \\\"id_column\\\": string|null },\\n  \\\"folder\\\": { \\\"id_patterns\\\": string[] }\\n}\\n\\nGuidance:\\n- If any Excel is present, prefer unit_strategy=excel_row, and set excel.id_column if an ID-like column is clear.\\n- If folders strongly look like per-patient folders, choose subfolder.\\n- If filenames contain consistent patient IDs, choose id_in_filename and propose 1-3 regex patterns.\\n- Otherwise fallback.\\n\\nHeuristic analysis:\\n{{$node[\\\"Heuristic Analysis\\\"].json.analysisText}}\"\n    }\n  ]\n}",
+        "bodyParametersJson": "{\n  \"model\": \"gpt-5.2-mini\",\n  \"temperature\": 0,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You output ONLY valid JSON (no markdown, no prose).\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"You are configuring a deterministic bulk-to-patient grouping step.\\n\\nReturn ONLY a JSON object with this schema:\\n{\\n  \\\"unit_strategy\\\": \\\"excel_row\\\"|\\\"subfolder\\\"|\\\"id_in_filename\\\"|\\\"fallback\\\",\\n  \\\"excel\\\": { \\\"id_column\\\": string|null },\\n  \\\"folder\\\": { \\\"id_patterns\\\": (string|{\\\"pattern\\\":string,\\\"group\\\":number})[] },\\n  \\\"quarantine\\\": { \\\"quarantine_threshold\\\": number }\\n}\\n\\nGuidance:\\n- If any Excel is present, prefer unit_strategy=excel_row, and set excel.id_column if an ID-like column is clear.\\n- If folders strongly look like per-patient folders, choose subfolder.\\n- If filenames contain consistent patient IDs, choose id_in_filename and propose 1-3 regex patterns. Prefer capture groups for the ID: {pattern: '...', group: 1}.\\n- Otherwise fallback.\\n- Set quarantine.quarantine_threshold to a sensible default (e.g., 0.55). Use higher (0.65) if data is noisy and you want fewer auto-processed candidates.\\n\\nHeuristic analysis:\\n{{$node[\\\"Heuristic Analysis\\\"].json.analysisText}}\"\n    }\n  ]\n}",
         "options": {}
       }
-    },
+    },    
     {
       "id": "5",
       "name": "Parse LLM Config",
@@ -645,7 +1059,7 @@ FILE EXTENSION: .json
       "typeVersion": 1,
       "position": [2080, 300],
       "parameters": {
-        "functionCode": "const { autoGroup } = require('/data/src');\n\nconst rawItems = items[0].json.rawItems ?? [];\nconst groupingConfig = items[0].json.groupingConfig ?? { unit_strategy: 'excel_row' };\nconst analysisText = items[0].json.analysisText ?? '';\n\nconst out = autoGroup(rawItems, groupingConfig, analysisText);\n\nreturn [{ json: out }];"
+        "functionCode": "const { autoGroup } = require('staffbotics-helpers');\n\nconst rawItems = items[0].json.rawItems ?? [];\nconst groupingConfig = items[0].json.groupingConfig ?? { unit_strategy: 'excel_row' };\nconst analysisText = items[0].json.analysisText ?? '';\n\nconst out = autoGroup(rawItems, groupingConfig, analysisText);\n\nreturn [{ json: out }];"
       }
     },
     {
@@ -655,7 +1069,7 @@ FILE EXTENSION: .json
       "typeVersion": 1,
       "position": [2440, 300],
       "parameters": {
-        "functionCode": "const { summarizeProposal } = require('/data/src');\n\nconst patientCandidates = items[0].json.patientCandidates ?? [];\nconst groupingConfig = items[0].json.groupingConfig ?? {};\nconst analysisText = items[0].json.analysisText ?? '';\n\nconst { summary } = summarizeProposal(patientCandidates, groupingConfig, analysisText);\n\nreturn [{\n  json: {\n    ...items[0].json,\n    summary\n  }\n}];"
+        "functionCode": "const { summarizeProposal } = require('staffbotics-helpers');\n\nconst patientCandidates = items[0].json.patientCandidates ?? [];\nconst groupingConfig = items[0].json.groupingConfig ?? {};\nconst analysisText = items[0].json.analysisText ?? '';\n\nconst { summary } = summarizeProposal(patientCandidates, groupingConfig, analysisText);\n\nreturn [{\n  json: {\n    ...items[0].json,\n    summary\n  }\n}];"
       }
     },
     {
@@ -695,7 +1109,7 @@ FILE EXTENSION: .json
       "typeVersion": 1,
       "position": [980, 760],
       "parameters": {
-        "functionCode": "const { applyOperations } = require('/data/src');\n\nfunction safeParseJsonArray(text) {\n  if (!text || typeof text !== 'string') return [];\n  try {\n    const parsed = JSON.parse(text);\n    return Array.isArray(parsed) ? parsed : [];\n  } catch (e) {}\n  const m = text.match(/\\[[\\s\\S]*\\]/);\n  if (m) {\n    try {\n      const parsed = JSON.parse(m[0]);\n      return Array.isArray(parsed) ? parsed : [];\n    } catch (e) {}\n  }\n  return [];\n}\n\n// Reorg webhook payload (the state the user sends in)\nconst payload = $node['Apply Reorg (Webhook)'].json.body ?? {};\nconst patientCandidates = payload.patientCandidates ?? [];\nconst rawItems = payload.rawItems ?? [];\nconst userInstruction = payload.instruction ?? '';\n\n// LLM operations response content\nconst llmResp = items[0].json;\nconst content = llmResp?.choices?.[0]?.message?.content ?? '';\nconst operations = safeParseJsonArray(content);\n\n// Build lookup for rawItems to repair reassign stubs\nconst rawItemById = {};\nfor (const ri of rawItems) rawItemById[ri.id] = ri;\n\nconst out = applyOperations(patientCandidates, operations, userInstruction);\n\n// Repair stubs produced by applyOperations(reassign)\nfor (const pc of out.patientCandidates || []) {\n  pc.raw_items = (pc.raw_items || []).map(ri => {\n    if (ri && ri.source_ref === 'reassigned' && rawItemById[ri.id]) return rawItemById[ri.id];\n    return ri;\n  });\n}\n\nreturn [{\n  json: {\n    patientCandidates: out.patientCandidates,\n    operationsApplied: out.operationsApplied,\n    userInstruction,\n    rawItems,\n    llm_raw: content\n  }\n}];"
+        "functionCode": "const { applyOperations } = require('staffbotics-helpers');\n\nfunction safeParseJsonArray(text) {\n  if (!text || typeof text !== 'string') return [];\n  try {\n    const parsed = JSON.parse(text);\n    return Array.isArray(parsed) ? parsed : [];\n  } catch (e) {}\n  const m = text.match(/\\[[\\s\\S]*\\]/);\n  if (m) {\n    try {\n      const parsed = JSON.parse(m[0]);\n      return Array.isArray(parsed) ? parsed : [];\n    } catch (e) {}\n  }\n  return [];\n}\n\n// Reorg webhook payload (the state the user sends in)\nconst payload = $node['Apply Reorg (Webhook)'].json.body ?? {};\nconst patientCandidates = payload.patientCandidates ?? [];\nconst rawItems = payload.rawItems ?? [];\nconst userInstruction = payload.instruction ?? '';\n\n// LLM operations response content\nconst llmResp = items[0].json;\nconst content = llmResp?.choices?.[0]?.message?.content ?? '';\nconst operations = safeParseJsonArray(content);\n\n// Build lookup for rawItems to repair reassign stubs\nconst rawItemById = {};\nfor (const ri of rawItems) rawItemById[ri.id] = ri;\n\nconst out = applyOperations(patientCandidates, operations, userInstruction);\n\n// Repair stubs produced by applyOperations(reassign)\nfor (const pc of out.patientCandidates || []) {\n  pc.raw_items = (pc.raw_items || []).map(ri => {\n    if (ri && ri.source_ref === 'reassigned' && rawItemById[ri.id]) return rawItemById[ri.id];\n    return ri;\n  });\n}\n\nreturn [{\n  json: {\n    patientCandidates: out.patientCandidates,\n    operationsApplied: out.operationsApplied,\n    userInstruction,\n    rawItems,\n    llm_raw: content\n  }\n}];"
       }
     }
   ],
@@ -795,5 +1209,955 @@ FILE EXTENSION: .json
   "meta": {
     "instanceId": "staffbotics-template"
   },
-  "active": false
+  "active": true
 }
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/data/example_payload.json
+TOTAL LINES: 17
+FILE NAME: example_payload.json
+FILE EXTENSION: .json
+--------------------------------------------------------------------------------
+{
+    "excelFiles": [
+      {
+        "name": "patients.xlsx",
+        "rows": [
+          { "Name": "John Doe", "NHC": "1234", "Age": 59, "Comments": "Has 2 PDF documents" },
+          { "Name": "Anna Smith", "NHC": "1235", "Age": 71, "Comments": "Only one report file" }
+        ]
+      }
+    ],
+    "files": [
+      { "path": "sample_batch_1/1234_scan.pdf", "filename": "1234_scan.pdf" },
+      { "path": "sample_batch_1/1234_report.pdf", "filename": "1234_report.pdf" },
+      { "path": "sample_batch_1/1235_report.pdf", "filename": "1235_report.pdf" }
+    ]
+  }
+  
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/data/sample_batch_1/1235_report.pdf
+TOTAL LINES: 1
+FILE NAME: 1235_report.pdf
+FILE EXTENSION: .pdf
+--------------------------------------------------------------------------------
+Dummy report for 1235
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/data/sample_batch_1/1234_scan.pdf
+TOTAL LINES: 1
+FILE NAME: 1234_scan.pdf
+FILE EXTENSION: .pdf
+--------------------------------------------------------------------------------
+Dummy scan for 1234
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/data/sample_batch_1/1234_report.pdf
+TOTAL LINES: 1
+FILE NAME: 1234_report.pdf
+FILE EXTENSION: .pdf
+--------------------------------------------------------------------------------
+Dummy report for 1234
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/docker-compose.yml
+TOTAL LINES: 140
+FILE NAME: docker-compose.yml
+FILE EXTENSION: .yml
+--------------------------------------------------------------------------------
+# docker-compose.yml
+#
+# Goal:
+# - Portable n8n + Postgres
+# - Automatically import your workflow JSON on first boot (or if missing)
+# - Ensure it is ACTIVE before the main n8n server starts
+# - Main n8n starts normally and registers production webhooks (/webhook/*)
+#
+# How it works:
+# - db: Postgres with a persisted volume (this is your portable state)
+# - n8n-init: a one-shot init job that:
+#   1) starts n8n once to run migrations (create workflow_entity table, etc.)
+#   2) imports your workflow if it does not exist
+#   3) activates it via n8n CLI (documented) BEFORE the main server starts
+# - n8n: the long-running server (loads ACTIVE workflows at startup and registers webhooks)
+#
+# IMPORTANT:
+# - This compose uses your .env automatically (Compose default behavior).
+# - Keep N8N_ENCRYPTION_KEY stable across machines for portability.
+# - Put your workflow JSON at: ./workflows/staffbotics.json
+
+services:
+  db:
+    image: postgres:14
+    container_name: staffbotics_db
+    restart: unless-stopped
+
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+    environment:
+      # These map directly from your .env (fallbacks are optional)
+      POSTGRES_DB: ${DB_POSTGRESDB_DATABASE:-n8n}
+      POSTGRES_USER: ${DB_POSTGRESDB_USER:-n8n}
+      POSTGRES_PASSWORD: ${DB_POSTGRESDB_PASSWORD:-n8n}
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_POSTGRESDB_USER:-n8n} -d ${DB_POSTGRESDB_DATABASE:-n8n}"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  n8n-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: staffbotics_n8n_local:latest
+    container_name: staffbotics_n8n_init
+    restart: "no"
+
+    depends_on:
+      db:
+        condition: service_healthy
+
+    # Override the image entrypoint so we can run a shell script deterministically
+    entrypoint: ["/bin/sh", "-lc"]
+
+    command: ["/data/scripts/n8n_init.sh"]
+
+    environment:
+      # --- n8n database config (from your .env) ---
+      DB_TYPE: ${DB_TYPE:-postgresdb}
+      DB_POSTGRESDB_HOST: ${DB_POSTGRESDB_HOST:-db}
+      DB_POSTGRESDB_PORT: ${DB_POSTGRESDB_PORT:-5432}
+      DB_POSTGRESDB_DATABASE: ${DB_POSTGRESDB_DATABASE:-n8n}
+      DB_POSTGRESDB_USER: ${DB_POSTGRESDB_USER:-n8n}
+      DB_POSTGRESDB_PASSWORD: ${DB_POSTGRESDB_PASSWORD:-n8n}
+
+      # --- required for portability of credentials ---
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+
+      # --- optional but recommended ---
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: ${N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS:-true}
+
+      # --- workflow import/activation settings (from your .env) ---
+      WF_NAME: ${WF_NAME}
+      WF_JSON_PATH: /data/workflows/staffbotics.json
+
+      # Used only for an optional verification request in init (method+path)
+      WEBHOOK_PATH: ${WEBHOOK_PATH}
+      WEBHOOK_METHOD: ${WEBHOOK_METHOD}
+
+      # Health endpoint used by init when it boots n8n once for migrations
+      N8N_PORT: ${N8N_PORT:-5678}
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+
+  n8n:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: staffbotics_n8n_local:latest
+    container_name: staffbotics_n8n
+    restart: unless-stopped
+
+    depends_on:
+      db:
+        condition: service_healthy
+      n8n-init:
+        condition: service_completed_successfully
+
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+    environment:
+      # --- n8n database config (from your .env) ---
+      DB_TYPE: ${DB_TYPE:-postgresdb}
+      DB_POSTGRESDB_HOST: ${DB_POSTGRESDB_HOST:-db}
+      DB_POSTGRESDB_PORT: ${DB_POSTGRESDB_PORT:-5432}
+      DB_POSTGRESDB_DATABASE: ${DB_POSTGRESDB_DATABASE:-n8n}
+      DB_POSTGRESDB_USER: ${DB_POSTGRESDB_USER:-n8n}
+      DB_POSTGRESDB_PASSWORD: ${DB_POSTGRESDB_PASSWORD:-n8n}
+
+      # --- required for portability of credentials ---
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+
+      # --- server settings (from your .env) ---
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: ${N8N_PORT:-5678}
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL:-http://localhost:5678}
+
+      # --- auth settings (from your .env) ---
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+      N8N_USER_MANAGEMENT_DISABLED: ${N8N_USER_MANAGEMENT_DISABLED:-true}
+      N8N_USER_EMAIL: ${N8N_USER_EMAIL:-admin@admin.com}
+
+      # --- optional but recommended ---
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: ${N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS:-true}
+      N8N_LOG_LEVEL: ${N8N_LOG_LEVEL:-info}
+      NODE_FUNCTION_ALLOW_EXTERNAL: ${NODE_FUNCTION_ALLOW_EXTERNAL:-*}
+      NODE_FUNCTION_ALLOW_BUILTIN: ${NODE_FUNCTION_ALLOW_BUILTIN:-*}
+
+volumes:
+  db_data:
+  n8n_data:
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/README.md
+TOTAL LINES: 329
+FILE NAME: README.md
+FILE EXTENSION: .md
+--------------------------------------------------------------------------------
+# Staffbotics Pipeline Dev
+
+## 🔍 Purpose
+This repository supports the development of the Staffbotics patient grouping pipeline. The goal is to process raw input data (excel rows, medical documents, folders) to produce structured groupings of patients for Athena Tech survival analysis. This grouping process is purely structural; **no clinical inference or entity recognition** should be done here - that part is already operational in Athena Tech.
+
+The aim: automate ingestion of batch data and files, auto-detect grouping logic, allow human review and adjustment via natural language or UI, and feed structured patient bundles into downstream pipelines.
+
+This pipeline turns messy, bulk clinical inputs (Excel files, PDFs, folders, mixed formats) into clean, per-patient data packages that can be reliably processed by downstream AI models. It first normalizes all inputs into a common internal format, analyzes their structure (rows, folders, filenames), and uses a constrained LLM only to choose a grouping strategy, not to extract data. The actual grouping is deterministic: Excel rows are merged into single patients using stable identity keys, files are safely attached using boundary-aware ID and name matching, and each resulting patient candidate is assigned a confidence score and explicit identity metadata.
+
+Crucially, the pipeline is designed for safety and scale. Ambiguous or low-confidence groupings are automatically quarantined instead of silently propagated, while high-confidence patients are marked “ready” for automated ingestion. A second endpoint allows humans to correct grouping mistakes using natural language, which is translated into deterministic operations (merge, reassign) without breaking reproducibility. The result is a production-ready bulk ingestion layer that removes manual data entry bottlenecks, preserves trust, and prepares each patient package for reliable downstream extraction, survival modeling, and future database reconciliation.
+
+---
+
+## 🚀 Instructions to Use
+
+### 1️⃣ Install Cursor
+Download and install Cursor from:  
+👉 https://cursor.com/
+
+### 2️⃣ Create the repository folder and files
+```bash
+mkdir staffbotics_n8n
+cd staffbotics_n8n
+git init .
+```
+
+### 3️⃣ Launch Docker stack
+```bash
+docker compose up -d
+```
+
+### 4️⃣ Open the repository in Cursor
+```bash
+cursor .
+```
+
+### 5️⃣ Edit workflow using Cursor → then re-import into n8n. **From inside n8n container**:
+
+### Ensure the API is enabled
+In n8n UI:
+Go to Settings → API
+
+Enable API (if needed)
+Create a new API Key
+Copy it.
+B) Put it into your .env
+Add:
+N8N_API_KEY=PASTE_YOUR_KEY_HERE
+
+```bash
+sh /data/scripts/import_overwrite.sh /data/workflows/staffbotics.json
+```
+
+### 7️⃣ Test the setup
+Use drag-and-drop via a local upload form or send a JSON test payload to the webhook.
+
+### Testing the Patient Grouping Pipeline
+
+To test the bulk patient grouping workflow locally, start the n8n workflow in **Test** mode and use the test webhook endpoint.
+
+1. Open the workflow in n8n and click **Execute Workflow**.
+2. Copy the test webhook URL for the `Receive Batch (Webhook)` node  
+   (e.g. `http://localhost:5678/webhook-test/staffbotics-batch`).
+3. Send a sample payload:
+
+```bash
+curl -X POST "http://localhost:5678/webhook/staffbotics-batch" \
+  -H "Content-Type: application/json" \
+  --data-binary @data/example_payload.json
+```
+
+Do not use this one, use the one above
+```bash
+curl -X POST "http://localhost:5678/webhook-test/staffbotics-batch" \
+  -H "Content-Type: application/json" \
+  --data-binary @data/example_payload.json
+```
+
+
+
+If the workflow is working correctly, it will return a grouping proposal with one patient candidate per individual, correctly attached files, confidence scores, and a human-readable summary. Only candidates marked as status: "ready" should be considered safe for downstream processing.
+
+########################################## We can delete from here down
+
+
+
+
+## 📦 Repo Structure
+
+```
+/staffbotics-pipeline-dev
+  ├─ src/                      # Reusable JavaScript/Python logic for grouping pipeline
+  ├─ workflows/               # Exported n8n workflows (.json format)
+  ├─ data/                    # Sample datasets for testing batch uploads
+  ├─ db/                      # Postgres volume
+  ├─ docker-compose.yml       # Local dev stack with n8n + PostgreSQL
+  ├─ .env                     # Environment variables locally
+  └─ README.md                # You are here
+
+
+
+Ingress (ingestion) → Inspect (ingestion) → Decide (grouping) → Group (grouping) → Repair (operations) → Summarize (summary) → Fan-out later (execution)
+
+
+src/
+├── ingestion/
+│   ├── rawItems.js          # Webhook payload → RawItem[]
+│   ├── heuristics.js        # Structure inspection (Excel + folders)
+│   └── index.js
+│
+├── identity/
+│   ├── normalize.js         # Canonical normalization
+│   ├── matching.js          # Cross-source matching
+│   ├── patientKey.js        # Identity key logic (optional split)
+│   └── index.js
+│
+├── grouping/
+│   ├── grouping.js          # autoGroup (strategy orchestration)
+│   ├── quarantine.js        # Rules & thresholds (can start inline)
+│   └── index.js
+│
+├── operations/
+│   ├── operations.js        # merge / reassign / strategy ops
+│   └── index.js
+│
+├── summary/
+│   ├── summary.js           # Human-readable output
+│   └── index.js
+│
+└── index.js                 # Public API for n8n
+
+
+
+
+
+```
+
+
+
+
+---
+
+## ⚙️ Development Stack
+
+- **n8n** (workflow automation with UI) — runs locally via Docker
+- **PostgreSQL** — for workflow persistence & future patient lookup
+- **Cursor AI** — for source code editing, JSON workflow enhancements, and AI dev assistance
+- **Docker Compose** — full local development orchestration
+- **Ngrok (optional)** — if external webhook testing is required
+- **HTML/React uploader page (optional)** — for drag-and-drop dataset input
+
+---
+
+## 🧠 Guidance for AI (Cursor) — Critical
+
+When writing or modifying code:
+
+> **You are assisting in development of the Staffbotics pipeline.**
+
+### You MUST follow these rules:
+
+- **Do not perform clinical inference or variable extraction — only structural grouping.**
+- Group data using identifiers, file structure, folder names, filenames, or deterministic logic.
+- Follow core pipeline architecture:
+  1. Ingest inputs (Excel, PDFs, folders, etc.)
+  2. Detect structure & suggest `GroupingConfig`
+  3. Auto grouping into `PatientCandidate[]`
+  4. Prompt user for reorganization (natural language allowed)
+  5. Apply changes
+  6. Emit structured output
+- Use and preserve the following JSON data models:
+
+```json
+// RawItem
+{
+  "id": "excel1_row3",
+  "source_type": "excel_row" | "file",
+  "source_ref": "patients.xlsx#row_3",
+  "metadata": { ... }
+}
+```
+
+```json
+// PatientCandidate
+{
+  "candidate_id": "cand_001",
+  "inferred_key": "Excel row 3",
+  "raw_items": [...],
+  "confidence": 0.96,
+  "notes": []
+}
+```
+
+```json
+// GroupingConfig
+{
+  "unit_strategy": "excel_row" | "subfolder" | "id_in_filename" | "llm_assisted",
+  "excel": { "file": "...", "row_is_patient": true, "id_column": "..."},
+  "folder": { "use_subfolders_as_patients": true, "id_patterns": ["\d{4}"] }
+}
+```
+
+🧪 Prefer deterministic logic first (folders, filename patterns, excel ID columns). Only use AI matching for structure suggestion or fallback grouping.
+
+⚠️ Never infer medical content. Only structure and group.
+
+---
+
+## 🚀 Local Development Workflow
+
+### 🟢 Start system
+
+```bash
+docker compose up -d
+```
+
+Access UI at:  
+👉 http://localhost:5678  
+(Default credentials if enabled: `admin` / `admin`)
+
+---
+
+## 🔁 Workflow Iteration (with Cursor)
+
+```bash
+# Export workflow (from n8n UI to local file)
+docker exec n8n n8n export-workflow --id <workflowId> --output /data/workflows/patient-grouping.json
+
+# Edit JSON in Cursor (AI assistance enabled)
+cursor .
+
+# After editing
+docker exec n8n n8n import-workflow --input /data/workflows/patient-grouping.json
+```
+
+Then refresh the UI.
+
+---
+
+## 📂 Testing Data Upload via Drag & Drop
+
+Create a local HTML file (eg. `uploader.html`):
+
+```html
+<!DOCTYPE html>
+<html>
+<body>
+  <h3>Upload Dataset</h3>
+  <form action="http://localhost:5678/webhook/staffbotics-batch" method="POST" enctype="multipart/form-data">
+    <input type="file" name="batchFiles" webkitdirectory directory multiple />
+    <button type="submit">Send</button>
+  </form>
+</body>
+</html>
+```
+
+Open in browser, drag the folder with test files → submit.
+
+---
+
+## 🧪 Example Input Structure (JSON via REST test)
+
+```json
+{
+  "excelFiles": [
+    {
+      "name": "patients.xlsx",
+      "rows": [
+        { "Name": "John Doe", "NHC": "1234", "Age": 59 },
+        { "Name": "Anna Smith", "NHC": "1235", "Age": 71 }
+      ]
+    }
+  ],
+  "files": [
+    { "path": "batch/1234_report.pdf", "filename": "1234_report.pdf" },
+    { "path": "batch/1234_scan.pdf", "filename": "1234_scan.pdf" },
+    { "path": "batch/1235_report.pdf", "filename": "1235_report.pdf" }
+  ]
+}
+```
+
+---
+
+## 🔄 Conventions
+
+| Rule | Reason |
+|------|--------|
+| Do **not** infer clinical data | That is handled by Athena Tech later |
+| Always group structurally | Reduces medical errors |
+| Prefer deterministic logic | Avoids AI hallucinations |
+| Log low-confidence matches | Human validation required |
+| Test with real data edge cases | Validate grouping reliability |
+
+---
+
+## 🔮 Future Extensions
+
+- Integrate DB patient existence detection
+- Add progress tracking via Staffbotics backend
+- Generate automatic import audit reports
+- Full UI wrapper (React-based) with conversational corrections
+
+---
+
+## 📝 Recommended Next Steps
+
+1. Build basic workflow in n8n UI
+2. Export & improve using Cursor
+3. Add grouping logic code into `src/grouping.js`
+4. Create test batch upload
+5. Iterate based on user review accuracy
+
+---
+
+## 📬 Contact / Team
+
+Lead: **Joan Ficapal Vila** — AI/ML & Survival Analysis  
+Company: **Athena Tech & Staffbotics**  
+Focus: AI infrastructure for personalized medicine
+
+---
+
+## 📌 Final Reminder to AI Assistants (Cursor)
+
+> *You are here to accelerate development following strict structure logic. Do not generate medical reasoning. Always respect the grouping rules. Aim for robust, scalable execution, not just correct-looking code.*
+
+---
+
+Happy building! 🚀
+Error reading /Users/ficapal/LocalProjects/staffbotics_n8n/scripts/.DS_Store: 'utf-8' codec can't decode byte 0x80 in position 3131: invalid start byte
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/scripts/n8n_init.sh
+TOTAL LINES: 132
+FILE NAME: n8n_init.sh
+FILE EXTENSION: .sh
+--------------------------------------------------------------------------------
+#!/bin/sh
+# scripts/n8n_init.sh
+#
+# Goal:
+# - Ensure the n8n DB schema exists (workflow_entity table, etc.)
+# - Import a workflow JSON if it does not already exist
+# - Mark EXACTLY ONE matching workflow as active (the most recently updated)
+# - Exit successfully so the main n8n service can start
+#
+# Why we boot n8n once here:
+# - On a fresh database, Postgres tables do not exist until n8n runs its migrations.
+# - If we try to query workflow_entity before migrations, we get:
+#   "relation workflow_entity does not exist"
+#
+# Uses documented n8n CLI commands:
+# - n8n import:workflow
+# - n8n update:workflow
+# n8n docs: https://docs.n8n.io/hosting/cli-commands/
+
+set -eu
+
+log() { echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] $*"; }
+
+# -------------------------------
+# Required inputs (from .env / compose)
+# -------------------------------
+: "${WF_NAME:?WF_NAME is required (must match the workflow name inside the JSON)}"
+: "${WF_JSON_PATH:?WF_JSON_PATH is required (path to workflow JSON inside container)}"
+
+# DB vars are required by n8n itself, but we also use them for psql checks
+: "${DB_POSTGRESDB_HOST:?}"
+: "${DB_POSTGRESDB_PORT:?}"
+: "${DB_POSTGRESDB_DATABASE:?}"
+: "${DB_POSTGRESDB_USER:?}"
+: "${DB_POSTGRESDB_PASSWORD:?}"
+
+export PGPASSWORD="$DB_POSTGRESDB_PASSWORD"
+
+# -------------------------------
+# 1) Wait for Postgres readiness
+# -------------------------------
+log "⏳ Waiting for Postgres..."
+until pg_isready -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" >/dev/null 2>&1; do
+  sleep 1
+done
+log "✅ Postgres is ready."
+
+# -------------------------------
+# 2) Ensure n8n schema exists by starting n8n once (migrations)
+# -------------------------------
+log "🚀 Booting n8n once to run DB migrations (schema creation)..."
+
+# Start n8n in the background. We don't publish ports from this container.
+# The purpose is ONLY: migrations -> create tables.
+n8n start >/tmp/n8n-init-start.log 2>&1 &
+N8N_PID="$!"
+
+# Wait for n8n health endpoint. n8n exposes /healthz.
+# We keep this conservative and retry for ~90 seconds.
+log "⏳ Waiting for n8n /healthz..."
+i=0
+until curl -fsS "http://127.0.0.1:${N8N_PORT:-5678}/healthz" >/dev/null 2>&1; do
+  i=$((i+1))
+  if [ "$i" -ge 90 ]; then
+    log "❌ n8n did not become healthy in time. Last logs:"
+    tail -n 200 /tmp/n8n-init-start.log || true
+    kill "$N8N_PID" >/dev/null 2>&1 || true
+    exit 1
+  fi
+  sleep 1
+done
+log "✅ n8n is healthy (migrations should be complete)."
+
+# Stop the background n8n started for migrations.
+log "🛑 Stopping the temporary n8n process..."
+kill "$N8N_PID" >/dev/null 2>&1 || true
+wait "$N8N_PID" >/dev/null 2>&1 || true
+log "✅ Temporary n8n stopped."
+
+# -------------------------------
+# 3) Check if workflow exists; import if missing
+# -------------------------------
+log "🔎 Checking if workflow exists (name='$WF_NAME')..."
+
+EXISTS_COUNT="$(psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -tA \
+  -c "SELECT COUNT(*) FROM workflow_entity WHERE name = '$(printf "%s" "$WF_NAME" | sed "s/'/''/g")';")"
+
+if [ "${EXISTS_COUNT:-0}" = "0" ]; then
+  if [ ! -f "$WF_JSON_PATH" ]; then
+    log "❌ Workflow JSON not found at: $WF_JSON_PATH"
+    exit 1
+  fi
+
+  log "⬆️ Importing workflow from: $WF_JSON_PATH"
+  n8n import:workflow --input="$WF_JSON_PATH"
+  log "✅ Import complete."
+else
+  log "✅ Workflow already exists ($EXISTS_COUNT row(s)); skipping import."
+fi
+
+# -------------------------------
+# 4) Choose ONE "winner" workflow row and activate it
+# -------------------------------
+# Note: In Postgres, n8n columns are camelCase, like "updatedAt".
+# We pick the most recently updated row if duplicates exist.
+WINNER_ID="$(psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -tA \
+  -c "SELECT id FROM workflow_entity WHERE name = '$(printf "%s" "$WF_NAME" | sed "s/'/''/g")' ORDER BY \"updatedAt\" DESC NULLS LAST LIMIT 1;")"
+
+if [ -z "$WINNER_ID" ]; then
+  log "❌ Could not find the workflow after import/check. Aborting."
+  exit 1
+fi
+
+log "🏁 Winner workflow id: $WINNER_ID"
+
+# Deactivate all workflows with that name (DB-level cleanup),
+# then activate the winner using the documented CLI command.
+# The CLI docs state changes take effect after restart.
+# Since the main n8n container starts AFTER this init job, it will load it as active.
+log "🧹 Deactivating any duplicate workflows with the same name..."
+psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -v ON_ERROR_STOP=1 \
+  -c "UPDATE workflow_entity SET active=false WHERE name = '$(printf "%s" "$WF_NAME" | sed "s/'/''/g")';" >/dev/null
+
+log "✅ Activating winner workflow via n8n CLI..."
+n8n update:workflow --id="$WINNER_ID" --active=true
+
+log "📌 Current rows for '$WF_NAME':"
+psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" \
+  -c "SELECT id, name, active FROM workflow_entity WHERE name = '$(printf "%s" "$WF_NAME" | sed "s/'/''/g")';" || true
+
+log "✅ Init completed successfully."
+exit 0
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/scripts/seed-create.sh
+TOTAL LINES: 73
+FILE NAME: seed-create.sh
+FILE EXTENSION: .sh
+--------------------------------------------------------------------------------
+#!/bin/sh
+set -eu
+# -e: exit immediately if a command fails
+# -u: error on unset variables (prevents silent bugs)
+
+# ------------------------------------------------------------------------------
+# seed-create.sh
+#
+# One-time operation:
+# - Takes your CURRENT local bind-mounted data directories:
+#     ./db         (Postgres data)
+#     ./n8n_data   (n8n home, incl. encryption/config, etc.)
+#   and copies them into:
+#     ./seed/db
+#     ./seed/n8n_data
+#
+# After this, fresh deploys can restore from ./seed/ automatically (headless).
+#
+# WARNING:
+# - This copies your DB + n8n home as-is (includes workflows, credentials, etc.)
+# - Do NOT commit ./seed/ to a public repo.
+# - If you rotate secrets/keys, you need to re-seed.
+# ------------------------------------------------------------------------------
+
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+SRC_DB="$ROOT_DIR/db"
+SRC_N8N="$ROOT_DIR/n8n_data"
+
+SEED_DIR="$ROOT_DIR/seed"
+DST_DB="$SEED_DIR/db"
+DST_N8N="$SEED_DIR/n8n_data"
+
+# --- Safety checks ---
+if [ ! -d "$SRC_DB" ]; then
+  echo "❌ Missing $SRC_DB (expected Postgres bind mount dir)."
+  echo "   Start your stack once so ./db exists, then re-run."
+  exit 1
+fi
+
+if [ ! -d "$SRC_N8N" ]; then
+  echo "❌ Missing $SRC_N8N (expected n8n bind mount dir)."
+  echo "   Start your stack once so ./n8n_data exists, then re-run."
+  exit 1
+fi
+
+# Require non-empty db directory (Postgres initializes a bunch of files)
+if [ -z "$(ls -A "$SRC_DB" 2>/dev/null || true)" ]; then
+  echo "❌ $SRC_DB is empty. Nothing to seed."
+  exit 1
+fi
+
+mkdir -p "$SEED_DIR"
+
+# Replace existing seed (explicit; simplest)
+rm -rf "$DST_DB" "$DST_N8N"
+mkdir -p "$DST_DB" "$DST_N8N"
+
+echo "🧬 Creating seed from:"
+echo "   - $SRC_DB   -> $DST_DB"
+echo "   - $SRC_N8N  -> $DST_N8N"
+echo ""
+
+# Copy preserving permissions/links/timestamps (portable enough for local bind mounts)
+# NOTE: On macOS Docker bind mounts, permissions can look different, but copying is still ok.
+cp -a "$SRC_DB/."  "$DST_DB/"
+cp -a "$SRC_N8N/." "$DST_N8N/"
+
+echo "✅ Seed created under: $SEED_DIR"
+echo ""
+echo "Next:"
+echo " - Ensure your workflow is ACTIVE in the seeded DB."
+echo " - Deploy anywhere with the same repo: seed will auto-restore on empty data dirs."
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/scripts/reset_db.sh
+TOTAL LINES: 4
+FILE NAME: reset_db.sh
+FILE EXTENSION: .sh
+--------------------------------------------------------------------------------
+#!/bin/sh
+
+docker compose down --remove-orphans
+rm -rf ./db ./n8n_data
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/entrypoint.sh
+TOTAL LINES: 182
+FILE NAME: entrypoint.sh
+FILE EXTENSION: .sh
+--------------------------------------------------------------------------------
+#!/bin/sh
+set -eu
+# -e: exit immediately if a command fails
+# -u: error on unset variables
+
+# ------------------------------------------------------------------------------
+# entrypoint.sh (FIXED: webhook “not registered” false-negative)
+#
+# Your Webhook node is configured as:
+#   httpMethod: "POST"
+#   path: "staffbotics-batch"
+#
+# n8n registers webhooks by *path + HTTP method*.
+# So if you probe with GET (curl http://.../webhook/staffbotics-batch),
+# n8n will correctly answer:
+#   "The requested webhook \"GET staffbotics-batch\" is not registered."
+# even when the POST webhook IS registered.
+#
+# Docs: “Only one webhook per path and method” + method matters for matching.
+# https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/common-issues/ :contentReference[oaicite:0]{index=0}
+#
+# This entrypoint:
+# 1) Starts n8n (bootstrap/migrations) and waits for /healthz
+# 2) Stops n8n (cleanly if possible; hard stop fallback)
+# 3) Imports workflow JSON (may temporarily deactivate during import)
+# 4) Forces workflow active=true in Postgres (by workflow NAME)
+# 5) Starts n8n in foreground
+# 6) Verifies the webhook is registered by probing with POST (not GET)
+# ------------------------------------------------------------------------------
+
+echo "🚀 Container entrypoint starting..."
+
+IMPORT_SCRIPT="/data/scripts/import_overwrite.sh"
+DB_ACTIVATE="/data/scripts/activate_workflow_db.sh"
+WF_JSON="/data/workflows/staffbotics.json"
+
+# Webhook we must verify (MUST match your Webhook node config)
+WEBHOOK_METHOD="POST"
+WEBHOOK_URL="http://127.0.0.1:5678/webhook/staffbotics-batch"
+
+# ------------------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------------------
+
+wait_for_healthz() {
+  echo "⏳ Waiting for n8n healthz..."
+  i=0
+  until curl -sf "http://127.0.0.1:5678/healthz" >/dev/null 2>&1; do
+    i=$((i+1))
+    if [ "$i" -ge 180 ]; then
+      echo "❌ n8n did not become ready in time (healthz not reachable)."
+      return 1
+    fi
+    sleep 1
+  done
+  echo "✅ n8n healthz OK."
+  return 0
+}
+
+# IMPORTANT: check the webhook with the SAME METHOD as the Webhook node (POST).
+# Any 2xx/3xx/4xx/5xx response other than n8n's "unknown webhook" 404 implies
+# the route exists. We treat HTTP 404 as "maybe not registered" ONLY when it is
+# the unknown-webhook JSON response (n8n logs it too).
+probe_webhook_post() {
+  # Using POST with a tiny JSON body. The workflow may return 200/4xx/5xx depending
+  # on nodes, but it should NOT be the "unknown webhook" 404 when registered.
+  #
+  # Also: n8n's unknown-webhook 404 is fast and has JSON:
+  # {"code":404,"message":"The requested webhook \"POST ...\" is not registered.",...}
+  #
+  # We detect it by status==404 AND response body containing "not registered".
+  body="$(curl -sS --max-time 3 -X POST \
+    -H "Content-Type: application/json" \
+    -d '{}' \
+    -w "\n%{http_code}" \
+    "$WEBHOOK_URL" || true)"
+
+  http_code="$(printf "%s" "$body" | tail -n 1)"
+  resp="$(printf "%s" "$body" | sed '$d')"
+
+  # If the route is registered, you typically get:
+  # - 200 (if workflow responds)
+  # - 500/4xx (if your workflow errors)  <-- still means route exists
+  #
+  # If NOT registered, you get 404 + "not registered" message.
+  if [ "$http_code" = "404" ] && printf "%s" "$resp" | grep -qi "not registered"; then
+    return 1
+  fi
+
+  return 0
+}
+
+wait_for_webhook_registered() {
+  echo "⏳ Waiting for webhook route to be registered (method=$WEBHOOK_METHOD): $WEBHOOK_URL"
+  i=0
+  while [ "$i" -lt 60 ]; do
+    if probe_webhook_post; then
+      echo "✅ Webhook route appears registered for $WEBHOOK_METHOD."
+      return 0
+    fi
+    i=$((i+1))
+    sleep 1
+  done
+
+  echo "❌ Webhook route NOT registered after waiting."
+  echo "   NOTE: Do NOT test with GET. This webhook is POST-only."
+  return 1
+}
+
+stop_n8n_pid() {
+  pid="$1"
+  if [ -z "${pid:-}" ]; then return 0; fi
+
+  # Try graceful, then hard kill
+  kill "$pid" 2>/dev/null || true
+  sleep 2
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+# ------------------------------------------------------------------------------
+# Sanity checks (fail fast)
+# ------------------------------------------------------------------------------
+if [ ! -f "$IMPORT_SCRIPT" ]; then
+  echo "❌ Missing: $IMPORT_SCRIPT"
+  exit 1
+fi
+if [ ! -f "$DB_ACTIVATE" ]; then
+  echo "❌ Missing: $DB_ACTIVATE"
+  exit 1
+fi
+if [ ! -f "$WF_JSON" ]; then
+  echo "❌ Missing workflow JSON: $WF_JSON"
+  exit 1
+fi
+
+# ------------------------------------------------------------------------------
+# Phase 1: Start n8n so it can run migrations/bootstrap
+# ------------------------------------------------------------------------------
+echo "🚀 Starting n8n (bootstrap/migrations phase)..."
+n8n start &
+PID="$!"
+
+wait_for_healthz
+
+# Allow a short grace period after healthz for any remaining init.
+sleep 5
+echo "✅ n8n reachable; proceeding to import step"
+
+# ------------------------------------------------------------------------------
+# Phase 2: Stop n8n before import/DB edits
+# ------------------------------------------------------------------------------
+echo "🛑 Stopping n8n (pre-import)..."
+stop_n8n_pid "$PID"
+
+# ------------------------------------------------------------------------------
+# Phase 3: Import workflow + force active=true in DB
+# ------------------------------------------------------------------------------
+echo "⬆️ Ensuring workflow exists and is configured for ACTIVE..."
+sh "$IMPORT_SCRIPT" "$WF_JSON"
+sh "$DB_ACTIVATE"
+
+# ------------------------------------------------------------------------------
+# Phase 4: Final start (foreground) + verify webhook registration with POST
+# ------------------------------------------------------------------------------
+echo "🚀 Starting n8n (final run)..."
+n8n start &
+PID="$!"
+
+wait_for_healthz
+
+# Wait for Active Workflow Manager to load active workflows and register routes.
+# IMPORTANT: this probes with POST (matches your Webhook node).
+if ! wait_for_webhook_registered; then
+  echo "🛑 Killing n8n because webhook is not registered."
+  stop_n8n_pid "$PID"
+  exit 1
+fi
+
+# Bring n8n into the foreground (keep container alive)
+echo "✅ n8n running and webhook verified."
+wait "$PID"

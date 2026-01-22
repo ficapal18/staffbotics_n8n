@@ -1,57 +1,140 @@
-version: '3.8'
+# docker-compose.yml
+#
+# Goal:
+# - Portable n8n + Postgres
+# - Automatically import your workflow JSON on first boot (or if missing)
+# - Ensure it is ACTIVE before the main n8n server starts
+# - Main n8n starts normally and registers production webhooks (/webhook/*)
+#
+# How it works:
+# - db: Postgres with a persisted volume (this is your portable state)
+# - n8n-init: a one-shot init job that:
+#   1) starts n8n once to run migrations (create workflow_entity table, etc.)
+#   2) imports your workflow if it does not exist
+#   3) activates it via n8n CLI (documented) BEFORE the main server starts
+# - n8n: the long-running server (loads ACTIVE workflows at startup and registers webhooks)
+#
+# IMPORTANT:
+# - This compose uses your .env automatically (Compose default behavior).
+# - Keep N8N_ENCRYPTION_KEY stable across machines for portability.
+# - Put your workflow JSON at: ./workflows/staffbotics.json
 
 services:
   db:
     image: postgres:14
-    restart: always
-    environment:
-      POSTGRES_USER: ${DB_POSTGRESDB_USER}
-      POSTGRES_PASSWORD: ${DB_POSTGRESDB_PASSWORD}
-      POSTGRES_DB: ${DB_POSTGRESDB_DATABASE}
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_POSTGRESDB_USER}"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    ports:
-      - "${DB_POSTGRESDB_PORT}:5432"
-    volumes:
-      - ./db:/var/lib/postgresql/data
+    container_name: staffbotics_db
+    restart: unless-stopped
 
-  n8n:
-    image: n8nio/n8n:latest
-    restart: always
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+    environment:
+      # These map directly from your .env (fallbacks are optional)
+      POSTGRES_DB: ${DB_POSTGRESDB_DATABASE:-n8n}
+      POSTGRES_USER: ${DB_POSTGRESDB_USER:-n8n}
+      POSTGRES_PASSWORD: ${DB_POSTGRESDB_PASSWORD:-n8n}
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_POSTGRESDB_USER:-n8n} -d ${DB_POSTGRESDB_DATABASE:-n8n}"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  n8n-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: staffbotics_n8n_local:latest
+    container_name: staffbotics_n8n_init
+    restart: "no"
+
     depends_on:
       db:
         condition: service_healthy
-    ports:
-      - "${N8N_PORT}:5678"
+
+    # Override the image entrypoint so we can run a shell script deterministically
+    entrypoint: ["/bin/sh", "-lc"]
+
+    command: ["/data/scripts/n8n_init.sh"]
+
     environment:
-      - N8N_BASIC_AUTH_USER
-      - N8N_BASIC_AUTH_PASSWORD
-      - N8N_USER_MANAGEMENT_DISABLED
-      - N8N_HOST
-      - N8N_PORT=5678
-      - N8N_EDITOR_BASE_URL
-      - N8N_PROTOCOL
-      - DB_TYPE
-      - DB_POSTGRESDB_HOST
-      - DB_POSTGRESDB_PORT
-      - DB_POSTGRESDB_DATABASE
-      - DB_POSTGRESDB_USER
-      - DB_POSTGRESDB_PASSWORD
-      - N8N_LOG_LEVEL
-      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS
-      - OPENAI_API_KEY
-      - NODE_FUNCTION_ALLOW_BUILTIN=*
-      - NODE_FUNCTION_ALLOW_EXTERNAL=*
+      # --- n8n database config (from your .env) ---
+      DB_TYPE: ${DB_TYPE:-postgresdb}
+      DB_POSTGRESDB_HOST: ${DB_POSTGRESDB_HOST:-db}
+      DB_POSTGRESDB_PORT: ${DB_POSTGRESDB_PORT:-5432}
+      DB_POSTGRESDB_DATABASE: ${DB_POSTGRESDB_DATABASE:-n8n}
+      DB_POSTGRESDB_USER: ${DB_POSTGRESDB_USER:-n8n}
+      DB_POSTGRESDB_PASSWORD: ${DB_POSTGRESDB_PASSWORD:-n8n}
+
+      # --- required for portability of credentials ---
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+
+      # --- optional but recommended ---
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: ${N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS:-true}
+
+      # --- workflow import/activation settings (from your .env) ---
+      WF_NAME: ${WF_NAME}
+      WF_JSON_PATH: /data/workflows/staffbotics.json
+
+      # Used only for an optional verification request in init (method+path)
+      WEBHOOK_PATH: ${WEBHOOK_PATH}
+      WEBHOOK_METHOD: ${WEBHOOK_METHOD}
+
+      # Health endpoint used by init when it boots n8n once for migrations
+      N8N_PORT: ${N8N_PORT:-5678}
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+
+  n8n:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: staffbotics_n8n_local:latest
+    container_name: staffbotics_n8n
+    restart: unless-stopped
+
+    depends_on:
+      db:
+        condition: service_healthy
+      n8n-init:
+        condition: service_completed_successfully
+
+    ports:
+      - "${N8N_PORT:-5678}:5678"
 
     volumes:
-      - ./workflows:/data/workflows
-      - ./src:/data/src
-      - ./local_files:/data/local_files
-      # existing
-      - ./sync-workflow.sh:/data/sync-workflow.sh:ro
-      - ./import_overwrite.sh:/data/import_overwrite.sh:ro
-      # ✅ STRONGLY RECOMMENDED persistence
-      - ./n8n_data:/home/node/.n8n
+      - n8n_data:/home/node/.n8n
+
+    environment:
+      # --- n8n database config (from your .env) ---
+      DB_TYPE: ${DB_TYPE:-postgresdb}
+      DB_POSTGRESDB_HOST: ${DB_POSTGRESDB_HOST:-db}
+      DB_POSTGRESDB_PORT: ${DB_POSTGRESDB_PORT:-5432}
+      DB_POSTGRESDB_DATABASE: ${DB_POSTGRESDB_DATABASE:-n8n}
+      DB_POSTGRESDB_USER: ${DB_POSTGRESDB_USER:-n8n}
+      DB_POSTGRESDB_PASSWORD: ${DB_POSTGRESDB_PASSWORD:-n8n}
+
+      # --- required for portability of credentials ---
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+
+      # --- server settings (from your .env) ---
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: ${N8N_PORT:-5678}
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL:-http://localhost:5678}
+
+      # --- auth settings (from your .env) ---
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+      N8N_USER_MANAGEMENT_DISABLED: ${N8N_USER_MANAGEMENT_DISABLED:-true}
+      N8N_USER_EMAIL: ${N8N_USER_EMAIL:-admin@admin.com}
+
+      # --- optional but recommended ---
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: ${N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS:-true}
+      N8N_LOG_LEVEL: ${N8N_LOG_LEVEL:-info}
+      NODE_FUNCTION_ALLOW_EXTERNAL: ${NODE_FUNCTION_ALLOW_EXTERNAL:-*}
+      NODE_FUNCTION_ALLOW_BUILTIN: ${NODE_FUNCTION_ALLOW_BUILTIN:-*}
+
+volumes:
+  db_data:
+  n8n_data:

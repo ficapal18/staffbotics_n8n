@@ -1,0 +1,164 @@
+# docker-compose.yml
+#
+# Goal
+# ----
+# Portable n8n + Postgres that:
+#  1) Persists data in Docker volumes (portable across machines if you copy volumes or dump/restore DB)
+#  2) Auto-imports a workflow JSON on boot (if missing)
+#  3) Forces the workflow ACTIVE in Postgres
+#  4) Starts n8n in production mode so /webhook/* routes are registered
+#
+# Design
+# ------
+# We run TWO n8n containers:
+#  - n8n-init (one-shot): imports + activates the workflow in the DB
+#  - n8n (long-running): starts the server and loads ACTIVE workflows, registering webhooks
+#
+# Requirements in your repo
+# -------------------------
+#  - Dockerfile builds an image that contains:
+#      /data/scripts/n8n_init.sh
+#      /data/workflows/staffbotics.json
+#  - scripts/ and workflows/ folders are copied into the image by Dockerfile
+#
+# Environment (.env)
+# ------------------
+# Uses variables from your .env (already provided):
+#  - DB_* vars, N8N_* vars, WF_NAME, WEBHOOK_PATH, WEBHOOK_METHOD, OPENAI_API_KEY, etc.
+
+services:
+  # -------------------------------
+  # 🗄️ Postgres (persistent storage)
+  # -------------------------------
+  db:
+    image: postgres:14
+    container_name: staffbotics_db
+    restart: unless-stopped
+
+    # Persistent DB storage
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+    # Use .env variables (keep stable for portability)
+    environment:
+      POSTGRES_DB: ${DB_POSTGRESDB_DATABASE}
+      POSTGRES_USER: ${DB_POSTGRESDB_USER}
+      POSTGRES_PASSWORD: ${DB_POSTGRESDB_PASSWORD}
+
+    # Wait until DB is ready before running init/import
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_POSTGRESDB_USER} -d ${DB_POSTGRESDB_DATABASE}"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  # --------------------------------------------
+  # 🧩 n8n-init (one-shot workflow import/activate)
+  # --------------------------------------------
+  n8n-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: staffbotics_n8n_local:latest
+    container_name: staffbotics_n8n_init
+    restart: "no"
+
+    depends_on:
+      db:
+        condition: service_healthy
+
+    # Run a shell to execute the init script stored in the image
+    entrypoint: ["/bin/sh", "-lc"]
+
+    # This script must exist in the image and handle:
+    #  - importing the workflow JSON if missing
+    #  - forcing active=true for the desired workflow in Postgres
+    command: "/data/scripts/n8n_init.sh"
+
+    environment:
+      # --- Database connection (from .env) ---
+      DB_TYPE: ${DB_TYPE}
+      DB_POSTGRESDB_HOST: ${DB_POSTGRESDB_HOST}
+      DB_POSTGRESDB_PORT: ${DB_POSTGRESDB_PORT}
+      DB_POSTGRESDB_DATABASE: ${DB_POSTGRESDB_DATABASE}
+      DB_POSTGRESDB_USER: ${DB_POSTGRESDB_USER}
+      DB_POSTGRESDB_PASSWORD: ${DB_POSTGRESDB_PASSWORD}
+
+      # --- Security/portability (from .env) ---
+      # IMPORTANT: must match the server container for credentials portability.
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: ${N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS}
+
+      # --- Workflow import settings ---
+      # Path inside the image where the workflow JSON is copied
+      WF_JSON_PATH: /data/workflows/staffbotics.json
+
+      # The workflow name inside the JSON (from .env)
+      WF_NAME: ${WF_NAME}
+
+      # Webhook node path/method (from .env)
+      WF_WEBHOOK_PATH: ${WEBHOOK_PATH}
+      WF_WEBHOOK_METHOD: ${WEBHOOK_METHOD}
+
+      # Optional: pass-through for any nodes needing it
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+  # ---------------------------------
+  # 🚀 n8n server (production runtime)
+  # ---------------------------------
+  n8n:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: staffbotics_n8n_local:latest
+    container_name: staffbotics_n8n
+    restart: unless-stopped
+
+    depends_on:
+      db:
+        condition: service_healthy
+      n8n-init:
+        condition: service_completed_successfully
+
+    # Expose the editor + webhook endpoints
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+
+    # Persist n8n local config/state
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+    environment:
+      # --- Database connection (from .env) ---
+      DB_TYPE: ${DB_TYPE}
+      DB_POSTGRESDB_HOST: ${DB_POSTGRESDB_HOST}
+      DB_POSTGRESDB_PORT: ${DB_POSTGRESDB_PORT}
+      DB_POSTGRESDB_DATABASE: ${DB_POSTGRESDB_DATABASE}
+      DB_POSTGRESDB_USER: ${DB_POSTGRESDB_USER}
+      DB_POSTGRESDB_PASSWORD: ${DB_POSTGRESDB_PASSWORD}
+
+      # --- Auth (from .env) ---
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+      N8N_USER_MANAGEMENT_DISABLED: ${N8N_USER_MANAGEMENT_DISABLED}
+      N8N_USER_EMAIL: ${N8N_USER_EMAIL}
+
+      # --- Security/portability (must match n8n-init) ---
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: ${N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS}
+
+      # --- Server settings (from .env) ---
+      N8N_HOST: ${N8N_HOST}
+      N8N_PORT: ${N8N_PORT}
+      N8N_PROTOCOL: ${N8N_PROTOCOL}
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL}
+
+      # Optional: pass-through for any nodes needing it
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+      # Recommended: enable runners to avoid upcoming default changes
+      N8N_RUNNERS_ENABLED: "true"
+
+volumes:
+  db_data:
+  n8n_data:

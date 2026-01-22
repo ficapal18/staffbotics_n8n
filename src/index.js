@@ -1,16 +1,35 @@
 // src/index.js
-// LLM usage: require('/data/src') to get all helpers in one import.
-const { buildRawItemsFromWebhookBody } = require("./rawItems");
-const { buildHeuristicAnalysis } = require("./heuristics");
+const { buildRawItemsFromWebhookBody, buildHeuristicAnalysis } = require("./ingestion");
 const { autoGroup, extractIdentifiersFromRow } = require("./grouping");
-const { summarizeProposal } = require("./summary");
 const { applyOperations } = require("./operations");
+const { summarizeProposal } = require("./summary");
+
+// (Optional) expose identity helpers for debugging/testing
+const {
+  normText,
+  normId,
+  normDate,
+  buildPatientKey,
+  filenameContainsId,
+  filenameMatchesName,
+  tokens
+} = require("./identity");
 
 module.exports = {
+  // pipeline
   buildRawItemsFromWebhookBody,
   buildHeuristicAnalysis,
   autoGroup,
-  extractIdentifiersFromRow,
+  applyOperations,
   summarizeProposal,
-  applyOperations
+
+  // optional helpers
+  extractIdentifiersFromRow,
+  normText,
+  normId,
+  normDate,
+  buildPatientKey,
+  filenameContainsId,
+  filenameMatchesName,
+  tokens
 };
