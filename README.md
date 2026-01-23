@@ -1,264 +1,272 @@
-# Staffbotics Pipeline Dev
+# Staffbotics n8n (Workflow-as-Code) — Patient Grouping Pipeline
 
-## 🔍 Purpose
-This repository supports the development of the Staffbotics patient grouping pipeline. The goal is to process raw input data (excel rows, medical documents, folders) to produce structured groupings of patients for Athena Tech survival analysis. This grouping process is purely structural; **no clinical inference or entity recognition** should be done here - that part is already operational in Athena Tech.
+This repo provides a **portable, deterministic n8n deployment** (Docker Compose) plus a **version-controlled workflow** (`./workflows/staffbotics.json`) and a small **helper library** (`./src/`) used by n8n Function nodes.
 
-The aim: automate ingestion of batch data and files, auto-detect grouping logic, allow human review and adjustment via natural language or UI, and feed structured patient bundles into downstream pipelines.
+**One command brings the system up from scratch:**
 
-This pipeline turns messy, bulk clinical inputs (Excel files, PDFs, folders, mixed formats) into clean, per-patient data packages that can be reliably processed by downstream AI models. It first normalizes all inputs into a common internal format, analyzes their structure (rows, folders, filenames), and uses a constrained LLM only to choose a grouping strategy, not to extract data. The actual grouping is deterministic: Excel rows are merged into single patients using stable identity keys, files are safely attached using boundary-aware ID and name matching, and each resulting patient candidate is assigned a confidence score and explicit identity metadata.
+```bash
+docker compose up --build
+```
 
-Crucially, the pipeline is designed for safety and scale. Ambiguous or low-confidence groupings are automatically quarantined instead of silently propagated, while high-confidence patients are marked “ready” for automated ingestion. A second endpoint allows humans to correct grouping mistakes using natural language, which is translated into deterministic operations (merge, reassign) without breaking reproducibility. The result is a production-ready bulk ingestion layer that removes manual data entry bottlenecks, preserves trust, and prepares each patient package for reliable downstream extraction, survival modeling, and future database reconciliation.
+On any machine (laptop, server, CI runner), the stack converges to the same working state:
+
+- Postgres running (persistent volume)
+- n8n running
+- Workflow imported from `./workflows/staffbotics.json` (if missing)
+- Exactly one workflow with `WF_NAME` marked **active**
+- Production webhooks registered and listening:
+  - `POST /webhook/staffbotics-batch`
+  - `POST /webhook/staffbotics-reorg`
+
+No UI steps required to import or activate the workflow.
 
 ---
 
-## 🚀 Instructions to Use
+## Purpose (and safety boundaries)
 
-### 1️⃣ Install Cursor
-Download and install Cursor from:  
-👉 https://cursor.com/
+This pipeline turns messy bulk clinical inputs (Excel rows, PDFs, folders, mixed formats) into **clean per-patient bundles** for downstream processing.
 
-### 2️⃣ Create the repository folder and files
-```bash
-mkdir staffbotics_n8n
-cd staffbotics_n8n
-git init .
+**Scope is structural only**:
+- ✅ Group/organize by identifiers, filename patterns, folders, or Excel columns
+- ✅ Provide confidence and quarantine ambiguous groupings
+- ❌ No clinical inference
+- ❌ No entity extraction beyond simple identifiers (ID, name, DOB) used for grouping
+
+The LLM is used **only** to choose a grouping strategy/config (a constrained JSON object), while the grouping execution is deterministic.
+
+---
+
+## Quick start
+
+### 1) Requirements
+- Docker + Docker Compose
+
+### 2) Create a `.env`
+Create `./.env` (Compose auto-loads it). Minimum:
+
+```dotenv
+# Required
+N8N_ENCRYPTION_KEY=replace-with-a-long-random-string
+WF_NAME=Staffbotics Patient Grouping (MVP)
+
+# Optional (defaults shown)
+DB_POSTGRESDB_DATABASE=n8n
+DB_POSTGRESDB_USER=n8n
+DB_POSTGRESDB_PASSWORD=n8n
+N8N_PORT=5678
+N8N_HOST=localhost
+N8N_PROTOCOL=http
+N8N_EDITOR_BASE_URL=http://localhost:5678
+
+# Optional: enable basic auth for the editor + /rest endpoints
+# (If you set these, poststart toggle will authenticate to /rest/*)
+N8N_BASIC_AUTH_USER=
+N8N_BASIC_AUTH_PASSWORD=
+
+# Needed by the workflow nodes that call OpenAI
+OPENAI_API_KEY=
 ```
 
-### 3️⃣ Launch Docker stack
+**Important:** keep `N8N_ENCRYPTION_KEY` stable across machines/redeploys if you ever add credentials in the UI.
+
+### 3) Run
 ```bash
-docker compose up -d
+docker compose up --build
 ```
 
-### 4️⃣ Open the repository in Cursor
-```bash
-cursor .
-```
+n8n UI: `http://localhost:5678`
 
-### 5️⃣ Edit workflow using Cursor → then re-import into n8n. **From inside n8n container**:
-
-### Ensure the API is enabled
-In n8n UI:
-Go to Settings → API
-
-Enable API (if needed)
-Create a new API Key
-Copy it.
-B) Put it into your .env
-Add:
-N8N_API_KEY=PASTE_YOUR_KEY_HERE
-
-```bash
-sh /data/scripts/import_overwrite.sh /data/workflows/staffbotics.json
-```
-
-### 7️⃣ Test the setup
-Use drag-and-drop via a local upload form or send a JSON test payload to the webhook.
-
-### Testing the Patient Grouping Pipeline
-
-To test the bulk patient grouping workflow locally, start the n8n workflow in **Test** mode and use the test webhook endpoint.
-
-1. Open the workflow in n8n and click **Execute Workflow**.
-2. Copy the test webhook URL for the `Receive Batch (Webhook)` node  
-   (e.g. `http://localhost:5678/webhook-test/staffbotics-batch`).
-3. Send a sample payload:
-
+### 4) Test the production webhook (no “Execute Workflow” needed)
 ```bash
 curl -X POST "http://localhost:5678/webhook/staffbotics-batch" \
   -H "Content-Type: application/json" \
   --data-binary @data/example_payload.json
 ```
 
-Do not use this one, use the one above
-```bash
-curl -X POST "http://localhost:5678/webhook-test/staffbotics-batch" \
-  -H "Content-Type: application/json" \
-  --data-binary @data/example_payload.json
-```
-
-
-
-If the workflow is working correctly, it will return a grouping proposal with one patient candidate per individual, correctly attached files, confidence scores, and a human-readable summary. Only candidates marked as status: "ready" should be considered safe for downstream processing.
-
-########################################## We can delete from here down
-
-
-
-
-## 📦 Repo Structure
-
-```
-/staffbotics-pipeline-dev
-  ├─ src/                      # Reusable JavaScript/Python logic for grouping pipeline
-  ├─ workflows/               # Exported n8n workflows (.json format)
-  ├─ data/                    # Sample datasets for testing batch uploads
-  ├─ db/                      # Postgres volume
-  ├─ docker-compose.yml       # Local dev stack with n8n + PostgreSQL
-  ├─ .env                     # Environment variables locally
-  └─ README.md                # You are here
-
-
-
-Ingress (ingestion) → Inspect (ingestion) → Decide (grouping) → Group (grouping) → Repair (operations) → Summarize (summary) → Fan-out later (execution)
-
-
-src/
-├── ingestion/
-│   ├── rawItems.js          # Webhook payload → RawItem[]
-│   ├── heuristics.js        # Structure inspection (Excel + folders)
-│   └── index.js
-│
-├── identity/
-│   ├── normalize.js         # Canonical normalization
-│   ├── matching.js          # Cross-source matching
-│   ├── patientKey.js        # Identity key logic (optional split)
-│   └── index.js
-│
-├── grouping/
-│   ├── grouping.js          # autoGroup (strategy orchestration)
-│   ├── quarantine.js        # Rules & thresholds (can start inline)
-│   └── index.js
-│
-├── operations/
-│   ├── operations.js        # merge / reassign / strategy ops
-│   └── index.js
-│
-├── summary/
-│   ├── summary.js           # Human-readable output
-│   └── index.js
-│
-└── index.js                 # Public API for n8n
-
-
-
-
-
-```
-
-
-
+If working, you’ll get a JSON response containing:
+- `patientCandidates[]`
+- `confidence` + `status` (`ready` or `quarantine`)
+- a human-readable `summary`
 
 ---
 
-## ⚙️ Development Stack
+## What “workflow-as-code” means here
 
-- **n8n** (workflow automation with UI) — runs locally via Docker
-- **PostgreSQL** — for workflow persistence & future patient lookup
-- **Cursor AI** — for source code editing, JSON workflow enhancements, and AI dev assistance
-- **Docker Compose** — full local development orchestration
-- **Ngrok (optional)** — if external webhook testing is required
-- **HTML/React uploader page (optional)** — for drag-and-drop dataset input
+n8n has two different “states”:
 
----
+1) **Workflow exists in DB** (imported)
+2) **Workflow routes are registered in the running server** (only happens when workflow is *active* and loaded)
 
-## 🧠 Guidance for AI (Cursor) — Critical
-
-When writing or modifying code:
-
-> **You are assisting in development of the Staffbotics pipeline.**
-
-### You MUST follow these rules:
-
-- **Do not perform clinical inference or variable extraction — only structural grouping.**
-- Group data using identifiers, file structure, folder names, filenames, or deterministic logic.
-- Follow core pipeline architecture:
-  1. Ingest inputs (Excel, PDFs, folders, etc.)
-  2. Detect structure & suggest `GroupingConfig`
-  3. Auto grouping into `PatientCandidate[]`
-  4. Prompt user for reorganization (natural language allowed)
-  5. Apply changes
-  6. Emit structured output
-- Use and preserve the following JSON data models:
+A workflow can exist in Postgres but still return:
 
 ```json
-// RawItem
-{
-  "id": "excel1_row3",
-  "source_type": "excel_row" | "file",
-  "source_ref": "patients.xlsx#row_3",
-  "metadata": { ... }
-}
+{"message":"The requested webhook ... is not registered"}
 ```
 
-```json
-// PatientCandidate
-{
-  "candidate_id": "cand_001",
-  "inferred_key": "Excel row 3",
-  "raw_items": [...],
-  "confidence": 0.96,
-  "notes": []
-}
-```
+To make this deterministic, the stack uses a **boot pipeline**:
 
-```json
-// GroupingConfig
-{
-  "unit_strategy": "excel_row" | "subfolder" | "id_in_filename" | "llm_assisted",
-  "excel": { "file": "...", "row_is_patient": true, "id_column": "..."},
-  "folder": { "use_subfolders_as_patients": true, "id_patterns": ["\d{4}"] }
-}
-```
-
-🧪 Prefer deterministic logic first (folders, filename patterns, excel ID columns). Only use AI matching for structure suggestion or fallback grouping.
-
-⚠️ Never infer medical content. Only structure and group.
+1. Postgres becomes healthy
+2. `n8n-init` runs migrations, imports workflow if missing, and ensures it’s active
+3. Main `n8n` server starts and loads active workflows → registers `/webhook/*`
+4. `n8n-poststart-toggle` optionally toggles active off/on via REST to force route re-registration (workaround for edge-case startup bugs)
 
 ---
 
-## 🚀 Local Development Workflow
+## Repo layout
 
-### 🟢 Start system
+```
+staffbotics_n8n/
+├─ docker-compose.yml
+├─ Dockerfile
+├─ workflows/
+│  └─ staffbotics.json
+├─ scripts/
+│  ├─ n8n_init.sh
+│  ├─ n8n_poststart_toggle.sh
+│  └─ reset_db.sh
+├─ src/
+│  ├─ index.js
+│  ├─ ingestion/
+│  ├─ identity/
+│  ├─ grouping/
+│  ├─ operations/
+│  └─ summary/
+└─ data/
+   ├─ example_payload.json
+   └─ sample_batch_1/
+```
+
+---
+
+## Docker services (compose)
+
+### `db` (Postgres)
+- Runs Postgres 14
+- Stores data in `db_data` volume
+- Healthcheck gates the rest of the stack
+
+### `n8n-init` (one-shot)
+- Runs `scripts/n8n_init.sh`
+- Responsibilities:
+  - Wait for Postgres
+  - Trigger/ensure n8n migrations (schema creation)
+  - Enforce DB defaults needed for stable imports (guards against schema drift)
+  - Import workflow if missing
+  - Ensure **exactly one** workflow row named `WF_NAME` is active (winner = latest `updatedAt`)
+
+### `n8n` (long-running server)
+- Real n8n runtime
+- Loads active workflows and registers production webhooks
+- Persists n8n home directory in `n8n_data` volume
+
+### `n8n-poststart-toggle` (one-shot)
+- Runs `scripts/n8n_poststart_toggle.sh`
+- Responsibilities:
+  - Wait for n8n `/healthz`
+  - Lookup workflow ID in Postgres by `WF_NAME`
+  - Toggle workflow active off/on via REST (`PATCH /rest/workflows/:id`)
+  - Optionally probe `/webhook/<path>` and fail if it still reports “not registered”
+
+---
+
+## Scripts (important)
+
+All scripts live in `./scripts/` and are baked into the image at `/data/scripts/`.
+
+### `scripts/n8n_init.sh`
+**Deterministic bootstrap (pre-server).**
+
+What it does:
+1. Waits for Postgres readiness
+2. Starts `n8n` briefly and waits for `/healthz` (forces migrations)
+3. Verifies `workflow_entity` is queryable
+4. **Enforces DB defaults** required by `n8n import:workflow` in some n8n versions  
+   (e.g., `workflow_entity.active`, `workflow_entity.versionId`)
+5. Stops the temporary n8n process
+6. Imports `WF_JSON_PATH` if a workflow named `WF_NAME` does not exist
+7. Picks the “winner” workflow row (`ORDER BY updatedAt DESC`) and ensures:
+   - all rows with that name are deactivated
+   - winner is activated via `n8n update:workflow --active=true`
+
+Why it exists:
+- avoids UI/manual import
+- ensures clean convergence after DB wipes / volume deletes
+- prevents “workflow exists but inactive” states
+
+### `scripts/n8n_poststart_toggle.sh`
+**Forces webhook route registration in the running server.**
+
+What it does:
+1. Waits for n8n `/healthz` on the internal docker network
+2. Finds workflow ID in Postgres by `WF_NAME`
+3. Calls:
+   - `PATCH /rest/workflows/:id {"active": false}`
+   - `PATCH /rest/workflows/:id {"active": true}`
+4. Optionally probes the production webhook URL and fails if it still returns “not registered”
+
+Why it exists:
+- some n8n versions occasionally fail to register webhook routes on startup even when DB says active=true
+- the “toggle” emulates the UI action that re-registers routes
+
+### `scripts/reset_db.sh`
+Currently empty in this repo. Suggested usage:
+- add a helper script to stop the stack and remove volumes for a full clean slate, e.g.:
 
 ```bash
-docker compose up -d
+docker compose down -v
 ```
 
-Access UI at:  
-👉 http://localhost:5678  
-(Default credentials if enabled: `admin` / `admin`)
+(Keep in mind: deleting volumes deletes your Postgres DB and n8n home state.)
 
 ---
 
-## 🔁 Workflow Iteration (with Cursor)
+## The workflow (what it does)
 
-```bash
-# Export workflow (from n8n UI to local file)
-docker exec n8n n8n export-workflow --id <workflowId> --output /data/workflows/patient-grouping.json
+Workflow file: `workflows/staffbotics.json`  
+Workflow name must match `WF_NAME` in `.env`.
 
-# Edit JSON in Cursor (AI assistance enabled)
-cursor .
+### Webhooks
+- `POST /webhook/staffbotics-batch`
+  - Ingest payload → normalize to `RawItem[]`
+  - Heuristic analysis (Excel columns, folder structure)
+  - LLM chooses grouping config (constrained JSON)
+  - Deterministic grouping
+  - Summary response
 
-# After editing
-docker exec n8n n8n import-workflow --input /data/workflows/patient-grouping.json
-```
-
-Then refresh the UI.
-
----
-
-## 📂 Testing Data Upload via Drag & Drop
-
-Create a local HTML file (eg. `uploader.html`):
-
-```html
-<!DOCTYPE html>
-<html>
-<body>
-  <h3>Upload Dataset</h3>
-  <form action="http://localhost:5678/webhook/staffbotics-batch" method="POST" enctype="multipart/form-data">
-    <input type="file" name="batchFiles" webkitdirectory directory multiple />
-    <button type="submit">Send</button>
-  </form>
-</body>
-</html>
-```
-
-Open in browser, drag the folder with test files → submit.
+- `POST /webhook/staffbotics-reorg`
+  - Receives prior state + user instruction
+  - LLM converts instruction to a constrained operations array
+  - Deterministic operations applied (merge/reassign/strategy note)
 
 ---
 
-## 🧪 Example Input Structure (JSON via REST test)
+## Helper library (`src/`)
+
+The repo includes a small JS library used by Function nodes via:
+
+```js
+require("staffbotics-helpers")
+```
+
+Exports (see `src/index.js`):
+- ingestion:
+  - `buildRawItemsFromWebhookBody`
+  - `buildHeuristicAnalysis`
+- grouping:
+  - `autoGroup`
+  - `extractIdentifiersFromRow`
+- operations:
+  - `applyOperations`
+- summary:
+  - `summarizeProposal`
+- identity helpers (optional):
+  - `normText`, `normId`, `normDate`, `buildPatientKey`, filename matching helpers
+
+---
+
+## Example input
+
+See: `data/example_payload.json`
 
 ```json
 {
@@ -272,58 +280,51 @@ Open in browser, drag the folder with test files → submit.
     }
   ],
   "files": [
-    { "path": "batch/1234_report.pdf", "filename": "1234_report.pdf" },
-    { "path": "batch/1234_scan.pdf", "filename": "1234_scan.pdf" },
-    { "path": "batch/1235_report.pdf", "filename": "1235_report.pdf" }
+    { "path": "sample_batch_1/1234_scan.pdf", "filename": "1234_scan.pdf" },
+    { "path": "sample_batch_1/1234_report.pdf", "filename": "1234_report.pdf" },
+    { "path": "sample_batch_1/1235_report.pdf", "filename": "1235_report.pdf" }
   ]
 }
 ```
 
 ---
 
-## 🔄 Conventions
+## Troubleshooting
 
-| Rule | Reason |
-|------|--------|
-| Do **not** infer clinical data | That is handled by Athena Tech later |
-| Always group structurally | Reduces medical errors |
-| Prefer deterministic logic | Avoids AI hallucinations |
-| Log low-confidence matches | Human validation required |
-| Test with real data edge cases | Validate grouping reliability |
+### “Webhook is not registered”
+- Wait for `n8n-poststart-toggle` to complete (it runs once per start)
+- Check logs:
+  ```bash
+  docker compose logs -f n8n n8n-poststart-toggle
+  ```
 
----
+### Import errors about NOT NULL columns (e.g. `active`, `versionId`)
+- This repo applies schema guards in `scripts/n8n_init.sh`
+- For best determinism, **pin** the n8n image version instead of using `n8nio/n8n:latest`
 
-## 🔮 Future Extensions
+### Full reset
+Deletes Postgres + n8n home state:
 
-- Integrate DB patient existence detection
-- Add progress tracking via Staffbotics backend
-- Generate automatic import audit reports
-- Full UI wrapper (React-based) with conversational corrections
-
----
-
-## 📝 Recommended Next Steps
-
-1. Build basic workflow in n8n UI
-2. Export & improve using Cursor
-3. Add grouping logic code into `src/grouping.js`
-4. Create test batch upload
-5. Iterate based on user review accuracy
+```bash
+docker compose down -v
+docker compose up --build
+```
 
 ---
 
-## 📬 Contact / Team
+## Notes on credentials / “seed”
+This repo achieves **workflow-as-code bring-up** (workflow present + active + webhooks listening).
 
-Lead: **Joan Ficapal Vila** — AI/ML & Survival Analysis  
-Company: **Athena Tech & Staffbotics**  
-Focus: AI infrastructure for personalized medicine
+If you want to preserve UI state like:
+- credentials / API keys created in UI
+- users/projects/settings
+
+…you need either:
+- a DB snapshot/seed strategy, or
+- scripted credential export/import
 
 ---
 
-## 📌 Final Reminder to AI Assistants (Cursor)
-
-> *You are here to accelerate development following strict structure logic. Do not generate medical reasoning. Always respect the grouping rules. Aim for robust, scalable execution, not just correct-looking code.*
-
----
-
-Happy building! 🚀
+## Contact
+Lead: **Joan Ficapal Vila**  
+Company: **Athena Tech & Staffbotics**
