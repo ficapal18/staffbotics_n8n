@@ -985,7 +985,7 @@ module.exports = {
 
 --------------------------------------------------------------------------------
 NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/workflows/staffbotics.json
-TOTAL LINES: 222
+TOTAL LINES: 218
 FILE NAME: staffbotics.json
 FILE EXTENSION: .json
 --------------------------------------------------------------------------------
@@ -993,44 +993,40 @@ FILE EXTENSION: .json
   "name": "Staffbotics Patient Grouping (MVP)",
   "nodes": [
     {
-      "id": "1",
-      "name": "Receive Batch (Webhook)",
-      "type": "n8n-nodes-base.webhook",
-      "typeVersion": 1,
-      "position": [260, 300],
       "parameters": {
         "httpMethod": "POST",
         "path": "staffbotics-batch",
         "responseMode": "lastNode",
         "options": {}
-      }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [260, 300],
+      "id": "a1a0f9f2-8e44-4f83-8b2d-2c3e2a5c9c11",
+      "name": "Receive Batch (Webhook)",
+      "webhookId": "b6f6c9f4-7c8e-4ef2-8c1d-4d1c0b4b8b33"
     },
     {
-      "id": "2",
-      "name": "Build RawItems",
+      "parameters": {
+        "functionCode": "const { buildRawItemsFromWebhookBody } = require('staffbotics-helpers');\n\n// Webhook payload is usually in items[0].json.body, but handle both cases.\nconst payload = items[0].json.body ?? items[0].json;\n\nconst out = buildRawItemsFromWebhookBody(payload);\n\nreturn [{ json: out }];"
+      },
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
       "position": [620, 300],
-      "parameters": {
-        "functionCode": "const { buildRawItemsFromWebhookBody } = require('staffbotics-helpers');\n\n// Webhook payload is usually in items[0].json.body, but handle both cases.\nconst payload = items[0].json.body ?? items[0].json;\n\nconst out = buildRawItemsFromWebhookBody(payload);\n\nreturn [{ json: out }];"
-      }
+      "id": "c2d7ff1b-1c53-4b9a-9c4b-7d3a3b8b6a10",
+      "name": "Build RawItems"
     },
     {
-      "id": "3",
-      "name": "Heuristic Analysis",
+      "parameters": {
+        "functionCode": "const { buildHeuristicAnalysis } = require('staffbotics-helpers');\n\nconst originalBody = items[0].json.originalBody ?? {};\nconst { analysisText } = buildHeuristicAnalysis(originalBody);\n\nreturn [{\n  json: {\n    ...items[0].json,\n    analysisText\n  }\n}];"
+      },
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
       "position": [980, 300],
-      "parameters": {
-        "functionCode": "const { buildHeuristicAnalysis } = require('staffbotics-helpers');\n\nconst originalBody = items[0].json.originalBody ?? {};\nconst { analysisText } = buildHeuristicAnalysis(originalBody);\n\nreturn [{\n  json: {\n    ...items[0].json,\n    analysisText\n  }\n}];"
-      }
+      "id": "aa1b8fd8-7f8e-4d0f-9c6b-6a1c8e60b2cf",
+      "name": "Heuristic Analysis"
     },
     {
-      "id": "4",
-      "name": "Structure Advisor (LLM)",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 1,
-      "position": [1360, 300],
       "parameters": {
         "url": "https://api.openai.com/v1/chat/completions",
         "method": "POST",
@@ -1040,57 +1036,58 @@ FILE EXTENSION: .json
         "headerParametersJson": "{\n  \"Authorization\": \"Bearer {{$env.OPENAI_API_KEY}}\",\n  \"Content-Type\": \"application/json\"\n}",
         "bodyParametersJson": "{\n  \"model\": \"gpt-5.2-mini\",\n  \"temperature\": 0,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You output ONLY valid JSON (no markdown, no prose).\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"You are configuring a deterministic bulk-to-patient grouping step.\\n\\nReturn ONLY a JSON object with this schema:\\n{\\n  \\\"unit_strategy\\\": \\\"excel_row\\\"|\\\"subfolder\\\"|\\\"id_in_filename\\\"|\\\"fallback\\\",\\n  \\\"excel\\\": { \\\"id_column\\\": string|null },\\n  \\\"folder\\\": { \\\"id_patterns\\\": (string|{\\\"pattern\\\":string,\\\"group\\\":number})[] },\\n  \\\"quarantine\\\": { \\\"quarantine_threshold\\\": number }\\n}\\n\\nGuidance:\\n- If any Excel is present, prefer unit_strategy=excel_row, and set excel.id_column if an ID-like column is clear.\\n- If folders strongly look like per-patient folders, choose subfolder.\\n- If filenames contain consistent patient IDs, choose id_in_filename and propose 1-3 regex patterns. Prefer capture groups for the ID: {pattern: '...', group: 1}.\\n- Otherwise fallback.\\n- Set quarantine.quarantine_threshold to a sensible default (e.g., 0.55). Use higher (0.65) if data is noisy and you want fewer auto-processed candidates.\\n\\nHeuristic analysis:\\n{{$node[\\\"Heuristic Analysis\\\"].json.analysisText}}\"\n    }\n  ]\n}",
         "options": {}
-      }
-    },    
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [1360, 300],
+      "id": "4e6b0d0a-3c31-4f6d-bd8c-7a76c23f7c65",
+      "name": "Structure Advisor (LLM)"
+    },
     {
-      "id": "5",
-      "name": "Parse LLM Config",
+      "parameters": {
+        "functionCode": "function safeParseJson(text) {\n  if (!text || typeof text !== 'string') return null;\n  try { return JSON.parse(text); } catch (e) {}\n  const m = text.match(/\\{[\\s\\S]*\\}/);\n  if (m) {\n    try { return JSON.parse(m[0]); } catch (e) {}\n  }\n  return null;\n}\n\n// This node receives the HTTP response as items[0].json\nconst llmResp = items[0].json;\nconst content = llmResp?.choices?.[0]?.message?.content ?? '';\n\nconst groupingConfig = safeParseJson(content) || { unit_strategy: 'excel_row', excel: { id_column: null }, folder: { id_patterns: [] }, quarantine: { quarantine_threshold: 0.55 } };\n\n// Pull rawItems + analysisText from the previous deterministic nodes\nconst rawItems = $node['Heuristic Analysis'].json.rawItems ?? [];\nconst analysisText = $node['Heuristic Analysis'].json.analysisText ?? '';\nconst originalBody = $node['Heuristic Analysis'].json.originalBody ?? {};\n\nreturn [{\n  json: {\n    rawItems,\n    analysisText,\n    originalBody,\n    groupingConfig,\n    llm_raw: content\n  }\n}];"
+      },
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
       "position": [1720, 300],
-      "parameters": {
-        "functionCode": "function safeParseJson(text) {\n  if (!text || typeof text !== 'string') return null;\n  try { return JSON.parse(text); } catch (e) {}\n  const m = text.match(/\\{[\\s\\S]*\\}/);\n  if (m) {\n    try { return JSON.parse(m[0]); } catch (e) {}\n  }\n  return null;\n}\n\n// This node receives the HTTP response as items[0].json\nconst llmResp = items[0].json;\nconst content = llmResp?.choices?.[0]?.message?.content ?? '';\n\nconst groupingConfig = safeParseJson(content) || { unit_strategy: 'excel_row', excel: { id_column: null }, folder: { id_patterns: [] } };\n\n// Pull rawItems + analysisText from the previous deterministic nodes\nconst rawItems = $node['Heuristic Analysis'].json.rawItems ?? [];\nconst analysisText = $node['Heuristic Analysis'].json.analysisText ?? '';\nconst originalBody = $node['Heuristic Analysis'].json.originalBody ?? {};\n\nreturn [{\n  json: {\n    rawItems,\n    analysisText,\n    originalBody,\n    groupingConfig,\n    llm_raw: content\n  }\n}];"
-      }
+      "id": "0a9f9e16-78bb-4f46-9b03-2b0d6a0f63f6",
+      "name": "Parse LLM Config"
     },
     {
-      "id": "6",
-      "name": "Auto Grouping",
+      "parameters": {
+        "functionCode": "const { autoGroup } = require('staffbotics-helpers');\n\nconst rawItems = items[0].json.rawItems ?? [];\nconst groupingConfig = items[0].json.groupingConfig ?? { unit_strategy: 'excel_row' };\nconst analysisText = items[0].json.analysisText ?? '';\n\nconst out = autoGroup(rawItems, groupingConfig, analysisText);\n\nreturn [{ json: out }];"
+      },
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
       "position": [2080, 300],
-      "parameters": {
-        "functionCode": "const { autoGroup } = require('staffbotics-helpers');\n\nconst rawItems = items[0].json.rawItems ?? [];\nconst groupingConfig = items[0].json.groupingConfig ?? { unit_strategy: 'excel_row' };\nconst analysisText = items[0].json.analysisText ?? '';\n\nconst out = autoGroup(rawItems, groupingConfig, analysisText);\n\nreturn [{ json: out }];"
-      }
+      "id": "d8b0f2aa-4a6a-4d65-a7c4-7f6b8b3f6d90",
+      "name": "Auto Grouping"
     },
     {
-      "id": "7",
-      "name": "Summarize Proposal",
+      "parameters": {
+        "functionCode": "const { summarizeProposal } = require('staffbotics-helpers');\n\nconst patientCandidates = items[0].json.patientCandidates ?? [];\nconst groupingConfig = items[0].json.groupingConfig ?? {};\nconst analysisText = items[0].json.analysisText ?? '';\n\nconst { summary } = summarizeProposal(patientCandidates, groupingConfig, analysisText);\n\nreturn [{\n  json: {\n    ...items[0].json,\n    summary\n  }\n}];"
+      },
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
       "position": [2440, 300],
-      "parameters": {
-        "functionCode": "const { summarizeProposal } = require('staffbotics-helpers');\n\nconst patientCandidates = items[0].json.patientCandidates ?? [];\nconst groupingConfig = items[0].json.groupingConfig ?? {};\nconst analysisText = items[0].json.analysisText ?? '';\n\nconst { summary } = summarizeProposal(patientCandidates, groupingConfig, analysisText);\n\nreturn [{\n  json: {\n    ...items[0].json,\n    summary\n  }\n}];"
-      }
+      "id": "8a2f2c2e-6b3d-4c7d-8c0b-3d1d92f3d2aa",
+      "name": "Summarize Proposal"
     },
     {
-      "id": "8",
-      "name": "Apply Reorg (Webhook)",
-      "type": "n8n-nodes-base.webhook",
-      "typeVersion": 1,
-      "position": [260, 760],
       "parameters": {
         "httpMethod": "POST",
         "path": "staffbotics-reorg",
         "responseMode": "lastNode",
         "options": {}
-      }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [260, 760],
+      "id": "b8d2f41c-fd8f-4c72-9f22-1d2ed1f5b9d1",
+      "name": "Apply Reorg (Webhook)",
+      "webhookId": "3d5d1d1a-3f1b-4db5-9c7c-83a5e9b2a2fd"
     },
     {
-      "id": "9",
-      "name": "NL → Operations (LLM)",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 1,
-      "position": [620, 760],
       "parameters": {
         "url": "https://api.openai.com/v1/chat/completions",
         "method": "POST",
@@ -1100,17 +1097,22 @@ FILE EXTENSION: .json
         "headerParametersJson": "{\n  \"Authorization\": \"Bearer {{$env.OPENAI_API_KEY}}\",\n  \"Content-Type\": \"application/json\"\n}",
         "bodyParametersJson": "{\n  \"model\": \"gpt-5.2-mini\",\n  \"temperature\": 0,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You output ONLY valid JSON array (no markdown, no prose).\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Convert the instruction into an operations JSON array with schema: [{op:'merge'|'reassign'|'change_strategy', params:{...}}].\\n\\nInstruction:\\n{{$node[\\\"Apply Reorg (Webhook)\\\"].json.body.instruction}}\\n\\nValid candidate_ids:\\n{{JSON.stringify(($node[\\\"Apply Reorg (Webhook)\\\"].json.body.patientCandidates||[]).map(c=>c.candidate_id))}}\\n\\nValid raw_item ids:\\n{{JSON.stringify(($node[\\\"Apply Reorg (Webhook)\\\"].json.body.patientCandidates||[]).flatMap(c=>(c.raw_items||[]).map(r=>r.id)))}}\\n\\nRules:\\n- Use only valid IDs from the lists.\\n- merge params: {from:[candidate_id...], into:candidate_id}\\n- reassign params: {raw_item_id:rawItemId, new_candidate:candidate_id}\\n- change_strategy params: {unit_strategy:'excel_row'|'subfolder'|'id_in_filename'|'fallback'}\\nReturn JSON array only.\"\n    }\n  ]\n}",
         "options": {}
-      }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [620, 760],
+      "id": "f4b6e3ad-2c76-4a8f-9f2b-2b3dc5eaf881",
+      "name": "NL → Operations (LLM)"
     },
     {
-      "id": "10",
-      "name": "Apply Operations",
+      "parameters": {
+        "functionCode": "const { applyOperations } = require('staffbotics-helpers');\n\nfunction safeParseJsonArray(text) {\n  if (!text || typeof text !== 'string') return [];\n  try {\n    const parsed = JSON.parse(text);\n    return Array.isArray(parsed) ? parsed : [];\n  } catch (e) {}\n  const m = text.match(/\\[[\\s\\S]*\\]/);\n  if (m) {\n    try {\n      const parsed = JSON.parse(m[0]);\n      return Array.isArray(parsed) ? parsed : [];\n    } catch (e) {}\n  }\n  return [];\n}\n\n// Reorg webhook payload (the state the user sends in)\nconst payload = $node['Apply Reorg (Webhook)'].json.body ?? {};\nconst patientCandidates = payload.patientCandidates ?? [];\nconst rawItems = payload.rawItems ?? [];\nconst userInstruction = payload.instruction ?? '';\n\n// LLM operations response content\nconst llmResp = items[0].json;\nconst content = llmResp?.choices?.[0]?.message?.content ?? '';\nconst operations = safeParseJsonArray(content);\n\n// Build lookup for rawItems to repair reassign stubs\nconst rawItemById = {};\nfor (const ri of rawItems) rawItemById[ri.id] = ri;\n\nconst out = applyOperations(patientCandidates, operations, userInstruction);\n\n// Repair stubs produced by applyOperations(reassign)\nfor (const pc of out.patientCandidates || []) {\n  pc.raw_items = (pc.raw_items || []).map(ri => {\n    if (ri && ri.source_ref === 'reassigned' && rawItemById[ri.id]) return rawItemById[ri.id];\n    return ri;\n  });\n}\n\nreturn [{\n  json: {\n    patientCandidates: out.patientCandidates,\n    operationsApplied: out.operationsApplied,\n    userInstruction,\n    rawItems,\n    llm_raw: content\n  }\n}];"
+      },
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
       "position": [980, 760],
-      "parameters": {
-        "functionCode": "const { applyOperations } = require('staffbotics-helpers');\n\nfunction safeParseJsonArray(text) {\n  if (!text || typeof text !== 'string') return [];\n  try {\n    const parsed = JSON.parse(text);\n    return Array.isArray(parsed) ? parsed : [];\n  } catch (e) {}\n  const m = text.match(/\\[[\\s\\S]*\\]/);\n  if (m) {\n    try {\n      const parsed = JSON.parse(m[0]);\n      return Array.isArray(parsed) ? parsed : [];\n    } catch (e) {}\n  }\n  return [];\n}\n\n// Reorg webhook payload (the state the user sends in)\nconst payload = $node['Apply Reorg (Webhook)'].json.body ?? {};\nconst patientCandidates = payload.patientCandidates ?? [];\nconst rawItems = payload.rawItems ?? [];\nconst userInstruction = payload.instruction ?? '';\n\n// LLM operations response content\nconst llmResp = items[0].json;\nconst content = llmResp?.choices?.[0]?.message?.content ?? '';\nconst operations = safeParseJsonArray(content);\n\n// Build lookup for rawItems to repair reassign stubs\nconst rawItemById = {};\nfor (const ri of rawItems) rawItemById[ri.id] = ri;\n\nconst out = applyOperations(patientCandidates, operations, userInstruction);\n\n// Repair stubs produced by applyOperations(reassign)\nfor (const pc of out.patientCandidates || []) {\n  pc.raw_items = (pc.raw_items || []).map(ri => {\n    if (ri && ri.source_ref === 'reassigned' && rawItemById[ri.id]) return rawItemById[ri.id];\n    return ri;\n  });\n}\n\nreturn [{\n  json: {\n    patientCandidates: out.patientCandidates,\n    operationsApplied: out.operationsApplied,\n    userInstruction,\n    rawItems,\n    llm_raw: content\n  }\n}];"
-      }
+      "id": "3b8b7a5e-1e2a-4c55-8d77-6b4f8c7b3c21",
+      "name": "Apply Operations"
     }
   ],
   "connections": {
@@ -1203,13 +1205,7 @@ FILE EXTENSION: .json
       ]
     }
   },
-  "settings": {},
-  "versionId": "staffbotics-patient-grouping-v1",
-  "id": "1",
-  "meta": {
-    "instanceId": "staffbotics-template"
-  },
-  "active": true
+  "settings": {}
 }
 
 --------------------------------------------------------------------------------
@@ -1261,32 +1257,41 @@ Dummy report for 1234
 
 --------------------------------------------------------------------------------
 NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/docker-compose.yml
-TOTAL LINES: 140
+TOTAL LINES: 191
 FILE NAME: docker-compose.yml
 FILE EXTENSION: .yml
 --------------------------------------------------------------------------------
 # docker-compose.yml
 #
 # Goal:
-# - Portable n8n + Postgres
-# - Automatically import your workflow JSON on first boot (or if missing)
-# - Ensure it is ACTIVE before the main n8n server starts
-# - Main n8n starts normally and registers production webhooks (/webhook/*)
+# - Portable n8n + Postgres (state in volumes)
+# - Converge on every boot to:
+#   - DB schema migrated
+#   - workflow imported from ./workflows/staffbotics.json (if missing)
+#   - exactly one workflow row with WF_NAME is active=true
+#   - production webhooks registered and responding on /webhook/*
 #
-# How it works:
-# - db: Postgres with a persisted volume (this is your portable state)
-# - n8n-init: a one-shot init job that:
-#   1) starts n8n once to run migrations (create workflow_entity table, etc.)
-#   2) imports your workflow if it does not exist
-#   3) activates it via n8n CLI (documented) BEFORE the main server starts
-# - n8n: the long-running server (loads ACTIVE workflows at startup and registers webhooks)
+# Why 3 n8n-related services (init + server + poststart toggle)?
+# - n8n-init (one-shot): ensures DB is ready + workflow exists + DB active flag is correct
+# - n8n (long-running): registers production webhook routes at runtime from active workflows
+# - n8n-poststart-toggle (one-shot): forces a UI-like "toggle active" after server is up,
+#   which can re-register webhook routes in cases where a workflow is active in DB
+#   but /webhook/* still returns "not registered".
 #
-# IMPORTANT:
-# - This compose uses your .env automatically (Compose default behavior).
-# - Keep N8N_ENCRYPTION_KEY stable across machines for portability.
-# - Put your workflow JSON at: ./workflows/staffbotics.json
+# Files expected in repo:
+# - ./workflows/staffbotics.json
+# - ./scripts/n8n_init.sh
+# - ./scripts/n8n_poststart_toggle.sh
+#
+# Notes:
+# - Compose loads .env automatically from the same folder (default behavior).
+# - Keep N8N_ENCRYPTION_KEY stable across machines, otherwise credentials break.
+# - If you enable Basic Auth, the poststart-toggle MUST send -u user:pass to /rest/*.
 
 services:
+  # -----------------------------
+  # Postgres (persistent state)
+  # -----------------------------
   db:
     image: postgres:14
     container_name: staffbotics_db
@@ -1296,7 +1301,7 @@ services:
       - db_data:/var/lib/postgresql/data
 
     environment:
-      # These map directly from your .env (fallbacks are optional)
+      # From your .env (fallbacks are safe for local dev)
       POSTGRES_DB: ${DB_POSTGRESDB_DATABASE:-n8n}
       POSTGRES_USER: ${DB_POSTGRESDB_USER:-n8n}
       POSTGRES_PASSWORD: ${DB_POSTGRESDB_PASSWORD:-n8n}
@@ -1307,6 +1312,9 @@ services:
       timeout: 3s
       retries: 40
 
+  # ----------------------------------------------------------
+  # n8n-init (one-shot): migrations + import + DB active flag
+  # ----------------------------------------------------------
   n8n-init:
     build:
       context: .
@@ -1319,13 +1327,12 @@ services:
       db:
         condition: service_healthy
 
-    # Override the image entrypoint so we can run a shell script deterministically
+    # We run a deterministic shell script instead of the default n8n entrypoint.
     entrypoint: ["/bin/sh", "-lc"]
-
     command: ["/data/scripts/n8n_init.sh"]
 
     environment:
-      # --- n8n database config (from your .env) ---
+      # --- n8n DB config (must match what the main n8n server will use) ---
       DB_TYPE: ${DB_TYPE:-postgresdb}
       DB_POSTGRESDB_HOST: ${DB_POSTGRESDB_HOST:-db}
       DB_POSTGRESDB_PORT: ${DB_POSTGRESDB_PORT:-5432}
@@ -1336,22 +1343,16 @@ services:
       # --- required for portability of credentials ---
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
 
-      # --- optional but recommended ---
-      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: ${N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS:-true}
-
-      # --- workflow import/activation settings (from your .env) ---
+      # --- workflow import/activation settings ---
       WF_NAME: ${WF_NAME}
       WF_JSON_PATH: /data/workflows/staffbotics.json
 
-      # Used only for an optional verification request in init (method+path)
-      WEBHOOK_PATH: ${WEBHOOK_PATH}
-      WEBHOOK_METHOD: ${WEBHOOK_METHOD}
-
-      # Health endpoint used by init when it boots n8n once for migrations
+      # --- used only for the temporary bootstrap start inside init ---
       N8N_PORT: ${N8N_PORT:-5678}
-      N8N_HOST: ${N8N_HOST:-localhost}
-      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
 
+  # -----------------------------------
+  # n8n (main server / long-running)
+  # -----------------------------------
   n8n:
     build:
       context: .
@@ -1370,10 +1371,11 @@ services:
       - "${N8N_PORT:-5678}:5678"
 
     volumes:
+      # n8n user folder (contains settings, encryption key usage, etc.)
       - n8n_data:/home/node/.n8n
 
     environment:
-      # --- n8n database config (from your .env) ---
+      # --- n8n DB config ---
       DB_TYPE: ${DB_TYPE:-postgresdb}
       DB_POSTGRESDB_HOST: ${DB_POSTGRESDB_HOST:-db}
       DB_POSTGRESDB_PORT: ${DB_POSTGRESDB_PORT:-5432}
@@ -1384,23 +1386,68 @@ services:
       # --- required for portability of credentials ---
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
 
-      # --- server settings (from your .env) ---
+      # --- server settings ---
       N8N_HOST: ${N8N_HOST:-localhost}
       N8N_PORT: ${N8N_PORT:-5678}
       N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
       N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL:-http://localhost:5678}
 
-      # --- auth settings (from your .env) ---
+      # --- auth settings (optional, but you have them enabled) ---
       N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
       N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+
+      # If you truly want "single-user" style setups, this is common.
+      # (If you use user management instead, adjust accordingly.)
       N8N_USER_MANAGEMENT_DISABLED: ${N8N_USER_MANAGEMENT_DISABLED:-true}
       N8N_USER_EMAIL: ${N8N_USER_EMAIL:-admin@admin.com}
 
-      # --- optional but recommended ---
-      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: ${N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS:-true}
+      # --- optional logging/config ---
       N8N_LOG_LEVEL: ${N8N_LOG_LEVEL:-info}
+
+      # Allow require() in Function/Code nodes (dev convenience)
       NODE_FUNCTION_ALLOW_EXTERNAL: ${NODE_FUNCTION_ALLOW_EXTERNAL:-*}
       NODE_FUNCTION_ALLOW_BUILTIN: ${NODE_FUNCTION_ALLOW_BUILTIN:-*}
+
+  # -------------------------------------------------------------------
+  # n8n-poststart-toggle (one-shot): force UI-like activate toggle
+  # -------------------------------------------------------------------
+  n8n-poststart-toggle:
+    image: staffbotics_n8n_local:latest
+    container_name: staffbotics_n8n_poststart_toggle
+    restart: "no"
+
+    # Wait until the main server container has started.
+    # (We still wait on /healthz inside the script for readiness.)
+    depends_on:
+      n8n:
+        condition: service_started
+
+    entrypoint: ["/bin/sh", "-lc"]
+    command: ["/data/scripts/n8n_poststart_toggle.sh"]
+
+    environment:
+      # --- DB lookup for workflow ID by name ---
+      DB_POSTGRESDB_HOST: ${DB_POSTGRESDB_HOST:-db}
+      DB_POSTGRESDB_PORT: ${DB_POSTGRESDB_PORT:-5432}
+      DB_POSTGRESDB_DATABASE: ${DB_POSTGRESDB_DATABASE:-n8n}
+      DB_POSTGRESDB_USER: ${DB_POSTGRESDB_USER:-n8n}
+      DB_POSTGRESDB_PASSWORD: ${DB_POSTGRESDB_PASSWORD:-n8n}
+
+      # Workflow name to target
+      WF_NAME: ${WF_NAME}
+
+      # Internal URL to reach n8n from inside the compose network
+      N8N_INTERNAL_URL: http://n8n:5678
+
+      # IMPORTANT:
+      # If Basic Auth is enabled on n8n, /rest/* is protected.
+      # The script must authenticate when PATCHing /rest/workflows/:id.
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+
+      # Optional verification probe (must match your webhook node)
+      WEBHOOK_METHOD: POST
+      WEBHOOK_PATH: staffbotics-batch
 
 volumes:
   db_data:
@@ -1745,40 +1792,34 @@ Error reading /Users/ficapal/LocalProjects/staffbotics_n8n/scripts/.DS_Store: 'u
 
 --------------------------------------------------------------------------------
 NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/scripts/n8n_init.sh
-TOTAL LINES: 132
+TOTAL LINES: 112
 FILE NAME: n8n_init.sh
 FILE EXTENSION: .sh
 --------------------------------------------------------------------------------
 #!/bin/sh
 # scripts/n8n_init.sh
 #
-# Goal:
-# - Ensure the n8n DB schema exists (workflow_entity table, etc.)
-# - Import a workflow JSON if it does not already exist
-# - Mark EXACTLY ONE matching workflow as active (the most recently updated)
-# - Exit successfully so the main n8n service can start
+# Goal (pre-server):
+# - Wait for Postgres
+# - Trigger n8n migrations (create tables)
+# - Import the workflow JSON if missing
+# - Ensure exactly one workflow row with WF_NAME is active=true (winner = latest updatedAt)
 #
-# Why we boot n8n once here:
-# - On a fresh database, Postgres tables do not exist until n8n runs its migrations.
-# - If we try to query workflow_entity before migrations, we get:
-#   "relation workflow_entity does not exist"
+# Important:
+# - This does NOT guarantee production webhooks are registered yet.
+#   Webhook registration happens inside the running server process.
+#   The post-start toggle script handles the #21614-style edge case. :contentReference[oaicite:2]{index=2}
 #
-# Uses documented n8n CLI commands:
+# Uses n8n CLI commands:
 # - n8n import:workflow
 # - n8n update:workflow
-# n8n docs: https://docs.n8n.io/hosting/cli-commands/
 
 set -eu
 
 log() { echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] $*"; }
 
-# -------------------------------
-# Required inputs (from .env / compose)
-# -------------------------------
-: "${WF_NAME:?WF_NAME is required (must match the workflow name inside the JSON)}"
-: "${WF_JSON_PATH:?WF_JSON_PATH is required (path to workflow JSON inside container)}"
-
-# DB vars are required by n8n itself, but we also use them for psql checks
+: "${WF_NAME:?WF_NAME is required (must match workflow JSON name)}"
+: "${WF_JSON_PATH:?WF_JSON_PATH is required}"
 : "${DB_POSTGRESDB_HOST:?}"
 : "${DB_POSTGRESDB_PORT:?}"
 : "${DB_POSTGRESDB_DATABASE:?}"
@@ -1787,32 +1828,22 @@ log() { echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] $*"; }
 
 export PGPASSWORD="$DB_POSTGRESDB_PASSWORD"
 
-# -------------------------------
-# 1) Wait for Postgres readiness
-# -------------------------------
 log "⏳ Waiting for Postgres..."
 until pg_isready -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" >/dev/null 2>&1; do
   sleep 1
 done
 log "✅ Postgres is ready."
 
-# -------------------------------
-# 2) Ensure n8n schema exists by starting n8n once (migrations)
-# -------------------------------
-log "🚀 Booting n8n once to run DB migrations (schema creation)..."
-
-# Start n8n in the background. We don't publish ports from this container.
-# The purpose is ONLY: migrations -> create tables.
+# ---- Run migrations by briefly starting n8n ----
+log "🧱 Running n8n migrations bootstrap (start/healthz/stop)..."
 n8n start >/tmp/n8n-init-start.log 2>&1 &
 N8N_PID="$!"
 
-# Wait for n8n health endpoint. n8n exposes /healthz.
-# We keep this conservative and retry for ~90 seconds.
 log "⏳ Waiting for n8n /healthz..."
 i=0
 until curl -fsS "http://127.0.0.1:${N8N_PORT:-5678}/healthz" >/dev/null 2>&1; do
   i=$((i+1))
-  if [ "$i" -ge 90 ]; then
+  if [ "$i" -ge 180 ]; then
     log "❌ n8n did not become healthy in time. Last logs:"
     tail -n 200 /tmp/n8n-init-start.log || true
     kill "$N8N_PID" >/dev/null 2>&1 || true
@@ -1820,28 +1851,34 @@ until curl -fsS "http://127.0.0.1:${N8N_PORT:-5678}/healthz" >/dev/null 2>&1; do
   fi
   sleep 1
 done
-log "✅ n8n is healthy (migrations should be complete)."
+log "✅ n8n is healthy. Verifying schema exists..."
 
-# Stop the background n8n started for migrations.
-log "🛑 Stopping the temporary n8n process..."
+# Make sure workflow_entity exists now
+psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -tA \
+  -c "SELECT 1 FROM workflow_entity LIMIT 1;" >/dev/null 2>&1 || {
+    log "❌ workflow_entity still not queryable after migrations bootstrap."
+    kill "$N8N_PID" >/dev/null 2>&1 || true
+    exit 1
+  }
+
+log "✅ Schema present (workflow_entity is queryable)."
+
+log "🛑 Stopping temporary n8n (migrations done)..."
 kill "$N8N_PID" >/dev/null 2>&1 || true
 wait "$N8N_PID" >/dev/null 2>&1 || true
 log "✅ Temporary n8n stopped."
 
-# -------------------------------
-# 3) Check if workflow exists; import if missing
-# -------------------------------
-log "🔎 Checking if workflow exists (name='$WF_NAME')..."
+# ---- import if missing ----
+WF_ESCAPED="$(printf "%s" "$WF_NAME" | sed "s/'/''/g")"
 
-EXISTS_COUNT="$(psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -tA \
-  -c "SELECT COUNT(*) FROM workflow_entity WHERE name = '$(printf "%s" "$WF_NAME" | sed "s/'/''/g")';")"
+log "🔎 Checking if workflow exists (name='$WF_NAME')..."
+EXISTS_COUNT="$(
+  psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -tA \
+    -c "SELECT COUNT(*) FROM workflow_entity WHERE name='${WF_ESCAPED}';"
+)"
 
 if [ "${EXISTS_COUNT:-0}" = "0" ]; then
-  if [ ! -f "$WF_JSON_PATH" ]; then
-    log "❌ Workflow JSON not found at: $WF_JSON_PATH"
-    exit 1
-  fi
-
+  [ -f "$WF_JSON_PATH" ] || { log "❌ Missing workflow JSON at $WF_JSON_PATH"; exit 1; }
   log "⬆️ Importing workflow from: $WF_JSON_PATH"
   n8n import:workflow --input="$WF_JSON_PATH"
   log "✅ Import complete."
@@ -1849,315 +1886,218 @@ else
   log "✅ Workflow already exists ($EXISTS_COUNT row(s)); skipping import."
 fi
 
-# -------------------------------
-# 4) Choose ONE "winner" workflow row and activate it
-# -------------------------------
-# Note: In Postgres, n8n columns are camelCase, like "updatedAt".
-# We pick the most recently updated row if duplicates exist.
-WINNER_ID="$(psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -tA \
-  -c "SELECT id FROM workflow_entity WHERE name = '$(printf "%s" "$WF_NAME" | sed "s/'/''/g")' ORDER BY \"updatedAt\" DESC NULLS LAST LIMIT 1;")"
+# ---- choose winner and activate ----
+WINNER_ID="$(
+  psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -tA \
+    -c "SELECT id FROM workflow_entity WHERE name='${WF_ESCAPED}' ORDER BY \"updatedAt\" DESC NULLS LAST LIMIT 1;"
+)"
 
-if [ -z "$WINNER_ID" ]; then
-  log "❌ Could not find the workflow after import/check. Aborting."
-  exit 1
-fi
+[ -n "$WINNER_ID" ] || { log "❌ Could not find workflow after import/check."; exit 1; }
 
 log "🏁 Winner workflow id: $WINNER_ID"
 
-# Deactivate all workflows with that name (DB-level cleanup),
-# then activate the winner using the documented CLI command.
-# The CLI docs state changes take effect after restart.
-# Since the main n8n container starts AFTER this init job, it will load it as active.
-log "🧹 Deactivating any duplicate workflows with the same name..."
+log "🧹 Deactivating any duplicates with same name..."
 psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -v ON_ERROR_STOP=1 \
-  -c "UPDATE workflow_entity SET active=false WHERE name = '$(printf "%s" "$WF_NAME" | sed "s/'/''/g")';" >/dev/null
+  -c "UPDATE workflow_entity SET active=false WHERE name='${WF_ESCAPED}';" >/dev/null
 
 log "✅ Activating winner workflow via n8n CLI..."
 n8n update:workflow --id="$WINNER_ID" --active=true
 
 log "📌 Current rows for '$WF_NAME':"
 psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" \
-  -c "SELECT id, name, active FROM workflow_entity WHERE name = '$(printf "%s" "$WF_NAME" | sed "s/'/''/g")';" || true
+  -c "SELECT id, name, active, \"updatedAt\" FROM workflow_entity WHERE name='${WF_ESCAPED}';" || true
 
 log "✅ Init completed successfully."
+
+--------------------------------------------------------------------------------
+NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/scripts/n8n_poststart_toggle.sh
+TOTAL LINES: 179
+FILE NAME: n8n_poststart_toggle.sh
+FILE EXTENSION: .sh
+--------------------------------------------------------------------------------
+#!/bin/sh
+# scripts/n8n_poststart_toggle.sh
+#
+# PURPOSE
+# -------
+# Work around an n8n failure mode where:
+# - The workflow is active in the DB (active=true)
+# - n8n logs may even say "Activated workflow ..."
+# BUT:
+# - Production webhook URL /webhook/<path> returns:
+#     {"code":404,"message":"The requested webhook \"POST <path>\" is not registered.", ...}
+#
+# WHY THIS HAPPENS (PRACTICAL VIEW)
+# -------------------------------
+# Webhook routes are registered INSIDE the running n8n server process.
+# If something goes wrong during startup registration, you can end up with:
+# - DB says active=true
+# - server didn't register the route
+#
+# WHAT THIS SCRIPT DOES
+# ---------------------
+# 1) Wait until the main n8n server is healthy (/healthz)
+# 2) Lookup workflow ID by WF_NAME directly in Postgres (winner = latest updatedAt)
+# 3) Toggle activation "off then on" using the same REST endpoint the editor uses:
+#      PATCH /rest/workflows/:id  {"active":false}
+#      PATCH /rest/workflows/:id  {"active":true}
+#    This forces the running server to re-register the webhooks.
+# 4) Optionally verify the webhook no longer returns the "not registered" 404
+#
+# REQUIREMENTS
+# ------------
+# Inside the container image:
+# - curl
+# - psql client
+#
+# Required environment variables:
+# - WF_NAME
+# - DB_POSTGRESDB_HOST, DB_POSTGRESDB_PORT, DB_POSTGRESDB_DATABASE, DB_POSTGRESDB_USER, DB_POSTGRESDB_PASSWORD
+# - N8N_INTERNAL_URL (e.g. http://n8n:5678)
+#
+# Optional environment variables:
+# - N8N_BASIC_AUTH_USER, N8N_BASIC_AUTH_PASSWORD  (if /rest/* is protected by basic auth)
+# - WEBHOOK_METHOD (default POST)
+# - WEBHOOK_PATH (default staffbotics-batch)
+#
+# Exit codes:
+# - 0 success (toggle done, webhook probe not "not registered")
+# - 1 failure (can't reach health, can't find workflow, rest patch fails, still not registered)
+
+set -eu
+
+log() { echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] $*"; }
+
+# -----------------------------
+# Validate required env
+# -----------------------------
+: "${WF_NAME:?WF_NAME is required}"
+: "${DB_POSTGRESDB_HOST:?DB_POSTGRESDB_HOST is required}"
+: "${DB_POSTGRESDB_PORT:?DB_POSTGRESDB_PORT is required}"
+: "${DB_POSTGRESDB_DATABASE:?DB_POSTGRESDB_DATABASE is required}"
+: "${DB_POSTGRESDB_USER:?DB_POSTGRESDB_USER is required}"
+: "${DB_POSTGRESDB_PASSWORD:?DB_POSTGRESDB_PASSWORD is required}"
+: "${N8N_INTERNAL_URL:?N8N_INTERNAL_URL is required (e.g. http://n8n:5678)}"
+
+export PGPASSWORD="$DB_POSTGRESDB_PASSWORD"
+
+HEALTH_URL="${N8N_INTERNAL_URL%/}/healthz"
+
+WEBHOOK_METHOD="${WEBHOOK_METHOD:-POST}"
+WEBHOOK_PATH="${WEBHOOK_PATH:-staffbotics-batch}"
+WEBHOOK_URL="${N8N_INTERNAL_URL%/}/webhook/${WEBHOOK_PATH}"
+
+# If basic auth is set in compose, use it for /rest/* calls.
+# (If your instance does not use basic auth, this becomes a no-op.)
+BASIC_AUTH_ARGS=""
+if [ -n "${N8N_BASIC_AUTH_USER:-}" ] && [ -n "${N8N_BASIC_AUTH_PASSWORD:-}" ]; then
+  BASIC_AUTH_ARGS="-u ${N8N_BASIC_AUTH_USER}:${N8N_BASIC_AUTH_PASSWORD}"
+fi
+
+# -----------------------------
+# 1) Wait for n8n health
+# -----------------------------
+log "⏳ Waiting for n8n healthz at: $HEALTH_URL"
+i=0
+until curl -fsS "$HEALTH_URL" >/dev/null 2>&1; do
+  i=$((i+1))
+  if [ "$i" -ge 180 ]; then
+    log "❌ n8n did not become healthy in time."
+    exit 1
+  fi
+  sleep 1
+done
+log "✅ n8n is healthy."
+
+# -----------------------------
+# 2) Lookup workflow id (winner)
+# -----------------------------
+WF_ESCAPED="$(printf "%s" "$WF_NAME" | sed "s/'/''/g")"
+
+WF_ID="$(
+  psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -tA \
+    -c "SELECT id
+        FROM workflow_entity
+        WHERE name='${WF_ESCAPED}'
+        ORDER BY \"updatedAt\" DESC NULLS LAST
+        LIMIT 1;"
+)"
+
+if [ -z "${WF_ID:-}" ]; then
+  log "❌ Could not find workflow in DB by name='$WF_NAME'"
+  exit 1
+fi
+
+log "🏁 Target workflow id: $WF_ID (name='$WF_NAME')"
+
+# -----------------------------
+# 3) Toggle active off/on via REST
+# -----------------------------
+REST_URL="${N8N_INTERNAL_URL%/}/rest/workflows/${WF_ID}"
+
+rest_patch() {
+  # Args:
+  # - $1 workflow id
+  # - $2 json payload
+  id="$1"
+  json="$2"
+  url="${N8N_INTERNAL_URL%/}/rest/workflows/${id}"
+
+  # -f: fail on HTTP >= 400
+  # -sS: silent but show errors
+  # BASIC_AUTH_ARGS included if defined
+  curl -fsS \
+    $BASIC_AUTH_ARGS \
+    -X PATCH \
+    -H "Content-Type: application/json" \
+    -d "$json" \
+    "$url" \
+    >/dev/null
+}
+
+log "🔁 Toggling active=false via $REST_URL ..."
+rest_patch "$WF_ID" '{"active":false}'
+
+# Small pause so n8n processes the deactivation
+sleep 1
+
+log "🔁 Toggling active=true via $REST_URL ..."
+rest_patch "$WF_ID" '{"active":true}'
+
+log "✅ Toggled workflow via REST endpoint."
+
+# -----------------------------
+# 4) Verify webhook is registered
+# -----------------------------
+# We only verify that we are NOT getting the specific "not registered" 404.
+# Your workflow may still return other errors depending on responseMode,
+# missing nodes, auth, etc. That is separate from webhook registration.
+log "🔎 Verifying webhook route with ${WEBHOOK_METHOD} ${WEBHOOK_URL}"
+
+probe_body="$(curl -sS --max-time 6 \
+  -X "$WEBHOOK_METHOD" \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  -w "\n%{http_code}" \
+  "$WEBHOOK_URL" || true
+)"
+
+http_code="$(printf "%s" "$probe_body" | tail -n 1)"
+resp="$(printf "%s" "$probe_body" | sed '$d')"
+
+if [ "$http_code" = "404" ] && printf "%s" "$resp" | grep -qi "not registered"; then
+  log "❌ Still seeing 'not registered' for ${WEBHOOK_METHOD} ${WEBHOOK_PATH}"
+  log "Response was: $resp"
+  exit 1
+fi
+
+log "✅ Webhook does not return the 'not registered' 404 anymore."
+log "Done."
 exit 0
 
 --------------------------------------------------------------------------------
-NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/scripts/seed-create.sh
-TOTAL LINES: 73
-FILE NAME: seed-create.sh
-FILE EXTENSION: .sh
---------------------------------------------------------------------------------
-#!/bin/sh
-set -eu
-# -e: exit immediately if a command fails
-# -u: error on unset variables (prevents silent bugs)
-
-# ------------------------------------------------------------------------------
-# seed-create.sh
-#
-# One-time operation:
-# - Takes your CURRENT local bind-mounted data directories:
-#     ./db         (Postgres data)
-#     ./n8n_data   (n8n home, incl. encryption/config, etc.)
-#   and copies them into:
-#     ./seed/db
-#     ./seed/n8n_data
-#
-# After this, fresh deploys can restore from ./seed/ automatically (headless).
-#
-# WARNING:
-# - This copies your DB + n8n home as-is (includes workflows, credentials, etc.)
-# - Do NOT commit ./seed/ to a public repo.
-# - If you rotate secrets/keys, you need to re-seed.
-# ------------------------------------------------------------------------------
-
-ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-SRC_DB="$ROOT_DIR/db"
-SRC_N8N="$ROOT_DIR/n8n_data"
-
-SEED_DIR="$ROOT_DIR/seed"
-DST_DB="$SEED_DIR/db"
-DST_N8N="$SEED_DIR/n8n_data"
-
-# --- Safety checks ---
-if [ ! -d "$SRC_DB" ]; then
-  echo "❌ Missing $SRC_DB (expected Postgres bind mount dir)."
-  echo "   Start your stack once so ./db exists, then re-run."
-  exit 1
-fi
-
-if [ ! -d "$SRC_N8N" ]; then
-  echo "❌ Missing $SRC_N8N (expected n8n bind mount dir)."
-  echo "   Start your stack once so ./n8n_data exists, then re-run."
-  exit 1
-fi
-
-# Require non-empty db directory (Postgres initializes a bunch of files)
-if [ -z "$(ls -A "$SRC_DB" 2>/dev/null || true)" ]; then
-  echo "❌ $SRC_DB is empty. Nothing to seed."
-  exit 1
-fi
-
-mkdir -p "$SEED_DIR"
-
-# Replace existing seed (explicit; simplest)
-rm -rf "$DST_DB" "$DST_N8N"
-mkdir -p "$DST_DB" "$DST_N8N"
-
-echo "🧬 Creating seed from:"
-echo "   - $SRC_DB   -> $DST_DB"
-echo "   - $SRC_N8N  -> $DST_N8N"
-echo ""
-
-# Copy preserving permissions/links/timestamps (portable enough for local bind mounts)
-# NOTE: On macOS Docker bind mounts, permissions can look different, but copying is still ok.
-cp -a "$SRC_DB/."  "$DST_DB/"
-cp -a "$SRC_N8N/." "$DST_N8N/"
-
-echo "✅ Seed created under: $SEED_DIR"
-echo ""
-echo "Next:"
-echo " - Ensure your workflow is ACTIVE in the seeded DB."
-echo " - Deploy anywhere with the same repo: seed will auto-restore on empty data dirs."
-
---------------------------------------------------------------------------------
 NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/scripts/reset_db.sh
-TOTAL LINES: 4
+TOTAL LINES: 0
 FILE NAME: reset_db.sh
 FILE EXTENSION: .sh
 --------------------------------------------------------------------------------
-#!/bin/sh
-
-docker compose down --remove-orphans
-rm -rf ./db ./n8n_data
-
---------------------------------------------------------------------------------
-NEW FILE: /Users/ficapal/LocalProjects/staffbotics_n8n/entrypoint.sh
-TOTAL LINES: 182
-FILE NAME: entrypoint.sh
-FILE EXTENSION: .sh
---------------------------------------------------------------------------------
-#!/bin/sh
-set -eu
-# -e: exit immediately if a command fails
-# -u: error on unset variables
-
-# ------------------------------------------------------------------------------
-# entrypoint.sh (FIXED: webhook “not registered” false-negative)
-#
-# Your Webhook node is configured as:
-#   httpMethod: "POST"
-#   path: "staffbotics-batch"
-#
-# n8n registers webhooks by *path + HTTP method*.
-# So if you probe with GET (curl http://.../webhook/staffbotics-batch),
-# n8n will correctly answer:
-#   "The requested webhook \"GET staffbotics-batch\" is not registered."
-# even when the POST webhook IS registered.
-#
-# Docs: “Only one webhook per path and method” + method matters for matching.
-# https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/common-issues/ :contentReference[oaicite:0]{index=0}
-#
-# This entrypoint:
-# 1) Starts n8n (bootstrap/migrations) and waits for /healthz
-# 2) Stops n8n (cleanly if possible; hard stop fallback)
-# 3) Imports workflow JSON (may temporarily deactivate during import)
-# 4) Forces workflow active=true in Postgres (by workflow NAME)
-# 5) Starts n8n in foreground
-# 6) Verifies the webhook is registered by probing with POST (not GET)
-# ------------------------------------------------------------------------------
-
-echo "🚀 Container entrypoint starting..."
-
-IMPORT_SCRIPT="/data/scripts/import_overwrite.sh"
-DB_ACTIVATE="/data/scripts/activate_workflow_db.sh"
-WF_JSON="/data/workflows/staffbotics.json"
-
-# Webhook we must verify (MUST match your Webhook node config)
-WEBHOOK_METHOD="POST"
-WEBHOOK_URL="http://127.0.0.1:5678/webhook/staffbotics-batch"
-
-# ------------------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------------------
-
-wait_for_healthz() {
-  echo "⏳ Waiting for n8n healthz..."
-  i=0
-  until curl -sf "http://127.0.0.1:5678/healthz" >/dev/null 2>&1; do
-    i=$((i+1))
-    if [ "$i" -ge 180 ]; then
-      echo "❌ n8n did not become ready in time (healthz not reachable)."
-      return 1
-    fi
-    sleep 1
-  done
-  echo "✅ n8n healthz OK."
-  return 0
-}
-
-# IMPORTANT: check the webhook with the SAME METHOD as the Webhook node (POST).
-# Any 2xx/3xx/4xx/5xx response other than n8n's "unknown webhook" 404 implies
-# the route exists. We treat HTTP 404 as "maybe not registered" ONLY when it is
-# the unknown-webhook JSON response (n8n logs it too).
-probe_webhook_post() {
-  # Using POST with a tiny JSON body. The workflow may return 200/4xx/5xx depending
-  # on nodes, but it should NOT be the "unknown webhook" 404 when registered.
-  #
-  # Also: n8n's unknown-webhook 404 is fast and has JSON:
-  # {"code":404,"message":"The requested webhook \"POST ...\" is not registered.",...}
-  #
-  # We detect it by status==404 AND response body containing "not registered".
-  body="$(curl -sS --max-time 3 -X POST \
-    -H "Content-Type: application/json" \
-    -d '{}' \
-    -w "\n%{http_code}" \
-    "$WEBHOOK_URL" || true)"
-
-  http_code="$(printf "%s" "$body" | tail -n 1)"
-  resp="$(printf "%s" "$body" | sed '$d')"
-
-  # If the route is registered, you typically get:
-  # - 200 (if workflow responds)
-  # - 500/4xx (if your workflow errors)  <-- still means route exists
-  #
-  # If NOT registered, you get 404 + "not registered" message.
-  if [ "$http_code" = "404" ] && printf "%s" "$resp" | grep -qi "not registered"; then
-    return 1
-  fi
-
-  return 0
-}
-
-wait_for_webhook_registered() {
-  echo "⏳ Waiting for webhook route to be registered (method=$WEBHOOK_METHOD): $WEBHOOK_URL"
-  i=0
-  while [ "$i" -lt 60 ]; do
-    if probe_webhook_post; then
-      echo "✅ Webhook route appears registered for $WEBHOOK_METHOD."
-      return 0
-    fi
-    i=$((i+1))
-    sleep 1
-  done
-
-  echo "❌ Webhook route NOT registered after waiting."
-  echo "   NOTE: Do NOT test with GET. This webhook is POST-only."
-  return 1
-}
-
-stop_n8n_pid() {
-  pid="$1"
-  if [ -z "${pid:-}" ]; then return 0; fi
-
-  # Try graceful, then hard kill
-  kill "$pid" 2>/dev/null || true
-  sleep 2
-  kill -9 "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-}
-
-# ------------------------------------------------------------------------------
-# Sanity checks (fail fast)
-# ------------------------------------------------------------------------------
-if [ ! -f "$IMPORT_SCRIPT" ]; then
-  echo "❌ Missing: $IMPORT_SCRIPT"
-  exit 1
-fi
-if [ ! -f "$DB_ACTIVATE" ]; then
-  echo "❌ Missing: $DB_ACTIVATE"
-  exit 1
-fi
-if [ ! -f "$WF_JSON" ]; then
-  echo "❌ Missing workflow JSON: $WF_JSON"
-  exit 1
-fi
-
-# ------------------------------------------------------------------------------
-# Phase 1: Start n8n so it can run migrations/bootstrap
-# ------------------------------------------------------------------------------
-echo "🚀 Starting n8n (bootstrap/migrations phase)..."
-n8n start &
-PID="$!"
-
-wait_for_healthz
-
-# Allow a short grace period after healthz for any remaining init.
-sleep 5
-echo "✅ n8n reachable; proceeding to import step"
-
-# ------------------------------------------------------------------------------
-# Phase 2: Stop n8n before import/DB edits
-# ------------------------------------------------------------------------------
-echo "🛑 Stopping n8n (pre-import)..."
-stop_n8n_pid "$PID"
-
-# ------------------------------------------------------------------------------
-# Phase 3: Import workflow + force active=true in DB
-# ------------------------------------------------------------------------------
-echo "⬆️ Ensuring workflow exists and is configured for ACTIVE..."
-sh "$IMPORT_SCRIPT" "$WF_JSON"
-sh "$DB_ACTIVATE"
-
-# ------------------------------------------------------------------------------
-# Phase 4: Final start (foreground) + verify webhook registration with POST
-# ------------------------------------------------------------------------------
-echo "🚀 Starting n8n (final run)..."
-n8n start &
-PID="$!"
-
-wait_for_healthz
-
-# Wait for Active Workflow Manager to load active workflows and register routes.
-# IMPORTANT: this probes with POST (matches your Webhook node).
-if ! wait_for_webhook_registered; then
-  echo "🛑 Killing n8n because webhook is not registered."
-  stop_n8n_pid "$PID"
-  exit 1
-fi
-
-# Bring n8n into the foreground (keep container alive)
-echo "✅ n8n running and webhook verified."
-wait "$PID"

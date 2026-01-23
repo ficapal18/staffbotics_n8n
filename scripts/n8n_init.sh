@@ -1,33 +1,27 @@
 #!/bin/sh
 # scripts/n8n_init.sh
 #
-# Goal:
-# - Ensure the n8n DB schema exists (workflow_entity table, etc.)
-# - Import a workflow JSON if it does not already exist
-# - Mark EXACTLY ONE matching workflow as active (the most recently updated)
-# - Exit successfully so the main n8n service can start
+# Goal (pre-server):
+# - Wait for Postgres
+# - Trigger n8n migrations (create tables)
+# - Import the workflow JSON if missing
+# - Ensure exactly one workflow row with WF_NAME is active=true (winner = latest updatedAt)
 #
-# Why we boot n8n once here:
-# - On a fresh database, Postgres tables do not exist until n8n runs its migrations.
-# - If we try to query workflow_entity before migrations, we get:
-#   "relation workflow_entity does not exist"
+# Important:
+# - This does NOT guarantee production webhooks are registered yet.
+#   Webhook registration happens inside the running server process.
+#   The post-start toggle script handles the #21614-style edge case. :contentReference[oaicite:2]{index=2}
 #
-# Uses documented n8n CLI commands:
+# Uses n8n CLI commands:
 # - n8n import:workflow
 # - n8n update:workflow
-# n8n docs: https://docs.n8n.io/hosting/cli-commands/
 
 set -eu
 
 log() { echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] $*"; }
 
-# -------------------------------
-# Required inputs (from .env / compose)
-# -------------------------------
-: "${WF_NAME:?WF_NAME is required (must match the workflow name inside the JSON)}"
-: "${WF_JSON_PATH:?WF_JSON_PATH is required (path to workflow JSON inside container)}"
-
-# DB vars are required by n8n itself, but we also use them for psql checks
+: "${WF_NAME:?WF_NAME is required (must match workflow JSON name)}"
+: "${WF_JSON_PATH:?WF_JSON_PATH is required}"
 : "${DB_POSTGRESDB_HOST:?}"
 : "${DB_POSTGRESDB_PORT:?}"
 : "${DB_POSTGRESDB_DATABASE:?}"
@@ -36,32 +30,22 @@ log() { echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] $*"; }
 
 export PGPASSWORD="$DB_POSTGRESDB_PASSWORD"
 
-# -------------------------------
-# 1) Wait for Postgres readiness
-# -------------------------------
 log "⏳ Waiting for Postgres..."
 until pg_isready -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" >/dev/null 2>&1; do
   sleep 1
 done
 log "✅ Postgres is ready."
 
-# -------------------------------
-# 2) Ensure n8n schema exists by starting n8n once (migrations)
-# -------------------------------
-log "🚀 Booting n8n once to run DB migrations (schema creation)..."
-
-# Start n8n in the background. We don't publish ports from this container.
-# The purpose is ONLY: migrations -> create tables.
+# ---- Run migrations by briefly starting n8n ----
+log "🧱 Running n8n migrations bootstrap (start/healthz/stop)..."
 n8n start >/tmp/n8n-init-start.log 2>&1 &
 N8N_PID="$!"
 
-# Wait for n8n health endpoint. n8n exposes /healthz.
-# We keep this conservative and retry for ~90 seconds.
 log "⏳ Waiting for n8n /healthz..."
 i=0
 until curl -fsS "http://127.0.0.1:${N8N_PORT:-5678}/healthz" >/dev/null 2>&1; do
   i=$((i+1))
-  if [ "$i" -ge 90 ]; then
+  if [ "$i" -ge 180 ]; then
     log "❌ n8n did not become healthy in time. Last logs:"
     tail -n 200 /tmp/n8n-init-start.log || true
     kill "$N8N_PID" >/dev/null 2>&1 || true
@@ -69,28 +53,65 @@ until curl -fsS "http://127.0.0.1:${N8N_PORT:-5678}/healthz" >/dev/null 2>&1; do
   fi
   sleep 1
 done
-log "✅ n8n is healthy (migrations should be complete)."
+log "✅ n8n is healthy. Verifying schema exists..."
 
-# Stop the background n8n started for migrations.
-log "🛑 Stopping the temporary n8n process..."
+# Make sure workflow_entity exists now
+psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -tA \
+  -c "SELECT 1 FROM workflow_entity LIMIT 1;" >/dev/null 2>&1 || {
+    log "❌ workflow_entity still not queryable after migrations bootstrap."
+    kill "$N8N_PID" >/dev/null 2>&1 || true
+    exit 1
+  }
+
+log "✅ Schema present (workflow_entity is queryable)."
+
+# ---- Workaround for n8n import regressions / schema drift ----
+# Some n8n versions (especially when using :latest) can end up with:
+# - workflow_entity has new NOT NULL columns (e.g. active, versionId)
+# - but import:workflow inserts DEFAULT for them
+# If the DB column has NO DEFAULT, Postgres will insert NULL -> violates NOT NULL.
+#
+# We make the schema deterministic here:
+# - ensure required columns have DEFAULTs
+# - backfill any existing NULLs defensively
+log "🩹 Ensuring workflow_entity defaults exist (prevents NULLs on import)..."
+psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -v ON_ERROR_STOP=1 <<'SQL' >/dev/null
+-- Needed for gen_random_uuid() on Postgres 14 in many images
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- active: import uses DEFAULT; enforce safe default + backfill
+ALTER TABLE workflow_entity
+  ALTER COLUMN active SET DEFAULT false;
+UPDATE workflow_entity
+  SET active = false
+  WHERE active IS NULL;
+
+-- versionId: import uses DEFAULT; enforce safe default + backfill
+-- We store as text because n8n commonly uses string IDs; gen_random_uuid() is good enough here.
+ALTER TABLE workflow_entity
+  ALTER COLUMN "versionId" SET DEFAULT gen_random_uuid()::text;
+UPDATE workflow_entity
+  SET "versionId" = gen_random_uuid()::text
+  WHERE "versionId" IS NULL;
+SQL
+log "✅ workflow_entity defaults enforced."
+
+log "🛑 Stopping temporary n8n (migrations done)..."
 kill "$N8N_PID" >/dev/null 2>&1 || true
 wait "$N8N_PID" >/dev/null 2>&1 || true
 log "✅ Temporary n8n stopped."
 
-# -------------------------------
-# 3) Check if workflow exists; import if missing
-# -------------------------------
-log "🔎 Checking if workflow exists (name='$WF_NAME')..."
+# ---- import if missing ----
+WF_ESCAPED="$(printf "%s" "$WF_NAME" | sed "s/'/''/g")"
 
-EXISTS_COUNT="$(psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -tA \
-  -c "SELECT COUNT(*) FROM workflow_entity WHERE name = '$(printf "%s" "$WF_NAME" | sed "s/'/''/g")';")"
+log "🔎 Checking if workflow exists (name='$WF_NAME')..."
+EXISTS_COUNT="$(
+  psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -tA \
+    -c "SELECT COUNT(*) FROM workflow_entity WHERE name='${WF_ESCAPED}';"
+)"
 
 if [ "${EXISTS_COUNT:-0}" = "0" ]; then
-  if [ ! -f "$WF_JSON_PATH" ]; then
-    log "❌ Workflow JSON not found at: $WF_JSON_PATH"
-    exit 1
-  fi
-
+  [ -f "$WF_JSON_PATH" ] || { log "❌ Missing workflow JSON at $WF_JSON_PATH"; exit 1; }
   log "⬆️ Importing workflow from: $WF_JSON_PATH"
   n8n import:workflow --input="$WF_JSON_PATH"
   log "✅ Import complete."
@@ -98,35 +119,25 @@ else
   log "✅ Workflow already exists ($EXISTS_COUNT row(s)); skipping import."
 fi
 
-# -------------------------------
-# 4) Choose ONE "winner" workflow row and activate it
-# -------------------------------
-# Note: In Postgres, n8n columns are camelCase, like "updatedAt".
-# We pick the most recently updated row if duplicates exist.
-WINNER_ID="$(psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -tA \
-  -c "SELECT id FROM workflow_entity WHERE name = '$(printf "%s" "$WF_NAME" | sed "s/'/''/g")' ORDER BY \"updatedAt\" DESC NULLS LAST LIMIT 1;")"
+# ---- choose winner and activate ----
+WINNER_ID="$(
+  psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -tA \
+    -c "SELECT id FROM workflow_entity WHERE name='${WF_ESCAPED}' ORDER BY \"updatedAt\" DESC NULLS LAST LIMIT 1;"
+)"
 
-if [ -z "$WINNER_ID" ]; then
-  log "❌ Could not find the workflow after import/check. Aborting."
-  exit 1
-fi
+[ -n "$WINNER_ID" ] || { log "❌ Could not find workflow after import/check."; exit 1; }
 
 log "🏁 Winner workflow id: $WINNER_ID"
 
-# Deactivate all workflows with that name (DB-level cleanup),
-# then activate the winner using the documented CLI command.
-# The CLI docs state changes take effect after restart.
-# Since the main n8n container starts AFTER this init job, it will load it as active.
-log "🧹 Deactivating any duplicate workflows with the same name..."
+log "🧹 Deactivating any duplicates with same name..."
 psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" -v ON_ERROR_STOP=1 \
-  -c "UPDATE workflow_entity SET active=false WHERE name = '$(printf "%s" "$WF_NAME" | sed "s/'/''/g")';" >/dev/null
+  -c "UPDATE workflow_entity SET active=false WHERE name='${WF_ESCAPED}';" >/dev/null
 
 log "✅ Activating winner workflow via n8n CLI..."
 n8n update:workflow --id="$WINNER_ID" --active=true
 
 log "📌 Current rows for '$WF_NAME':"
 psql -h "$DB_POSTGRESDB_HOST" -p "$DB_POSTGRESDB_PORT" -U "$DB_POSTGRESDB_USER" -d "$DB_POSTGRESDB_DATABASE" \
-  -c "SELECT id, name, active FROM workflow_entity WHERE name = '$(printf "%s" "$WF_NAME" | sed "s/'/''/g")';" || true
+  -c "SELECT id, name, active, \"versionId\", \"updatedAt\" FROM workflow_entity WHERE name='${WF_ESCAPED}';" || true
 
 log "✅ Init completed successfully."
-exit 0
